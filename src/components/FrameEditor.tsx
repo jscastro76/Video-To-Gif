@@ -1,17 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2 } from 'lucide-react';
+import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 interface FrameEditorProps {
   frame: { filename: string; url: string };
+  frames: { filename: string; url: string }[];
   onUpdateFrame: (filename: string, newUrl: string, newBlob: Blob) => void;
+  onSelectFrame: (frame: { filename: string; url: string }) => void;
   onClose: () => void;
   ffmpeg: FFmpeg | null;
 }
 
-export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: FrameEditorProps) {
-  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai'>('view');
+export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFrame, onClose, ffmpeg }: FrameEditorProps) {
+  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand'>('view');
   const [threshold, setThreshold] = useState(0);
   const [brushSize, setBrushSize] = useState(20);
   const [prompt, setPrompt] = useState('');
@@ -27,7 +29,19 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
   // Watermark mode
   const [watermarkRect, setWatermarkRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
   const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
+
+  // Magic Wand mode
+  const [magicWandTolerance, setMagicWandTolerance] = useState(15);
+  const [magicWandMode, setMagicWandMode] = useState<'contiguous' | 'global'>('contiguous');
   
+  // Inpaint mode
+  const [inpaintModel, setInpaintModel] = useState('gemini-3.1-flash-image-preview');
+
+  // Navigation & Unsaved Changes
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [pendingNavigation, setPendingNavigation] = useState<'prev' | 'next' | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -53,8 +67,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
     }
   };
 
-  // Load image to canvas
-  useEffect(() => {
+  const resetCanvas = () => {
     const img = new Image();
     img.src = frame.url;
     img.onload = () => {
@@ -76,7 +89,13 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
       if (mctx) {
         mctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
       }
+      setHasUnsavedChanges(false);
     };
+  };
+
+  // Load image to canvas
+  useEffect(() => {
+    resetCanvas();
   }, [frame.url]);
 
   // Handle Edge Cleanup
@@ -103,6 +122,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
           }
         }
         ctx.putImageData(imgData, 0, 0);
+        setHasUnsavedChanges(true);
       }
     };
   };
@@ -127,6 +147,81 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (mode === 'magicWand') {
+      const coords = getCoordinates(e);
+      if (!coords) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const x = Math.floor(coords.x);
+      const y = Math.floor(coords.y);
+      
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imgData.data;
+      const width = canvas.width;
+      const height = canvas.height;
+      
+      const clickedIdx = (y * width + x) * 4;
+      const targetR = data[clickedIdx];
+      const targetG = data[clickedIdx + 1];
+      const targetB = data[clickedIdx + 2];
+      const targetA = data[clickedIdx + 3];
+
+      if (targetA === 0) return; // Already transparent
+
+      const colorMatch = (r: number, g: number, b: number, a: number) => {
+        if (a === 0) return false;
+        const distSq = (r - targetR) ** 2 + (g - targetG) ** 2 + (b - targetB) ** 2;
+        const maxDistSq = 195075; // 255^2 * 3
+        const thresholdSq = maxDistSq * Math.pow(magicWandTolerance / 100, 2);
+        return distSq <= thresholdSq;
+      };
+
+      if (magicWandMode === 'global') {
+        for (let i = 0; i < data.length; i += 4) {
+          if (colorMatch(data[i], data[i+1], data[i+2], data[i+3])) {
+            data[i+3] = 0;
+          }
+        }
+      } else {
+        // Contiguous (Flood Fill)
+        const visited = new Uint8Array(width * height);
+        const queue = [x, y];
+        visited[y * width + x] = 1;
+
+        while (queue.length > 0) {
+          const cy = queue.pop()!;
+          const cx = queue.pop()!;
+          const idx = (cy * width + cx) * 4;
+
+          data[idx + 3] = 0; // Make transparent
+
+          const neighbors = [
+            [cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]
+          ];
+
+          for (const [nx, ny] of neighbors) {
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+              const nIdx = ny * width + nx;
+              if (!visited[nIdx]) {
+                visited[nIdx] = 1;
+                const pIdx = nIdx * 4;
+                if (colorMatch(data[pIdx], data[pIdx+1], data[pIdx+2], data[pIdx+3])) {
+                  queue.push(nx, ny);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+      setHasUnsavedChanges(true);
+      return;
+    }
+
     if (mode === 'color') {
       const coords = getCoordinates(e);
       if (!coords) return;
@@ -273,6 +368,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
         ctx.drawImage(img, 0, 0);
       }
       
+      setHasUnsavedChanges(true);
       URL.revokeObjectURL(newUrl);
     } catch (err) {
       console.error(err);
@@ -291,6 +387,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
     
     ctx.clearRect(watermarkRect.x, watermarkRect.y, watermarkRect.w, watermarkRect.h);
     setWatermarkRect(null);
+    setHasUnsavedChanges(true);
   };
 
   const applyAutoAI = async () => {
@@ -320,6 +417,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
         ctx.putImageData(imgData, 0, 0);
       }
       
+      setHasUnsavedChanges(true);
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error(err);
@@ -329,16 +427,22 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
     }
   };
 
-  const saveChanges = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (blob) {
-        const newUrl = URL.createObjectURL(blob);
-        onUpdateFrame(frame.filename, newUrl, blob);
-        setMode('view');
+  const saveChanges = (): Promise<void> => {
+    return new Promise((resolve) => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        resolve();
+        return;
       }
-    }, 'image/png');
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const newUrl = URL.createObjectURL(blob);
+          onUpdateFrame(frame.filename, newUrl, blob);
+          setHasUnsavedChanges(false);
+        }
+        resolve();
+      }, 'image/png');
+    });
   };
 
   const handleInpaint = async () => {
@@ -387,7 +491,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
+        model: inpaintModel,
         contents: {
           parts: [
             {
@@ -422,6 +526,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
           mainCtx.drawImage(img, 0, 0);
         }
         clearMask();
+        setHasUnsavedChanges(true);
       } else {
         throw new Error("No image received from AI.");
       }
@@ -433,10 +538,48 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
     }
   };
 
+  const currentIndex = frames.findIndex(f => f.filename === frame.filename);
+  const hasPrev = currentIndex > 0;
+  const hasNext = currentIndex < frames.length - 1;
+
+  const handleNavigate = (direction: 'prev' | 'next') => {
+    if (hasUnsavedChanges) {
+      setPendingNavigation(direction);
+      setShowConfirmModal(true);
+    } else {
+      executeNavigation(direction);
+    }
+  };
+
+  const executeNavigation = (direction: 'prev' | 'next') => {
+    const newIndex = direction === 'prev' ? currentIndex - 1 : currentIndex + 1;
+    if (newIndex >= 0 && newIndex < frames.length) {
+      onSelectFrame(frames[newIndex]);
+      setHasUnsavedChanges(false);
+      setWatermarkRect(null);
+      clearMask();
+    }
+    setShowConfirmModal(false);
+    setPendingNavigation(null);
+  };
+
+  const handleConfirmSaveAndNavigate = async () => {
+    await saveChanges();
+    if (pendingNavigation) {
+      executeNavigation(pendingNavigation);
+    }
+  };
+
+  const handleConfirmDiscardAndNavigate = () => {
+    if (pendingNavigation) {
+      executeNavigation(pendingNavigation);
+    }
+  };
+
   return (
-    <div className="flex flex-col h-full bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden">
+    <div className="flex flex-col h-full bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden relative">
       <div className="p-4 border-b border-neutral-800 flex justify-between items-center bg-neutral-950">
-        <h3 className="font-medium text-neutral-200">Editing: {frame.filename}</h3>
+        <h3 className="font-medium text-neutral-200">Editing: {frame.filename} {hasUnsavedChanges && <span className="text-yellow-500 text-xs ml-2">(Unsaved Changes)</span>}</h3>
         <button onClick={onClose} className="text-sm text-neutral-400 hover:text-white">Close Editor</button>
       </div>
       
@@ -470,6 +613,13 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
             >
               <Wand2 className="w-4 h-4 mr-2" />
               Auto AI
+            </button>
+            <button 
+              onClick={() => { setMode('magicWand'); clearMask(); }}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center ${mode === 'magicWand' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
+            >
+              <Wand className="w-4 h-4 mr-2" />
+              Magic Wand
             </button>
             <button 
               onClick={() => { setMode('cleanup'); clearMask(); }}
@@ -586,6 +736,51 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
               </button>
             </div>
           )}
+
+          {mode === 'magicWand' && (
+            <div className="space-y-4 pt-4 border-t border-neutral-800">
+              <p className="text-xs text-neutral-400">Click on the image to make matching colors transparent.</p>
+              
+              <div>
+                <label className="text-xs text-neutral-400 block mb-1">Flood Mode</label>
+                <div className="flex bg-neutral-950 rounded-lg p-1">
+                  <button
+                    onClick={() => setMagicWandMode('contiguous')}
+                    className={`flex-1 text-xs py-1.5 rounded-md transition-colors ${magicWandMode === 'contiguous' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                  >
+                    Contiguous
+                  </button>
+                  <button
+                    onClick={() => setMagicWandMode('global')}
+                    className={`flex-1 text-xs py-1.5 rounded-md transition-colors ${magicWandMode === 'global' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                  >
+                    Global
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between mb-1">
+                  <label className="text-xs text-neutral-400">Tolerance</label>
+                  <span className="text-xs text-neutral-400">{magicWandTolerance}%</span>
+                </div>
+                <input 
+                  type="range" min="0" max="100" 
+                  value={magicWandTolerance} 
+                  onChange={(e) => setMagicWandTolerance(Number(e.target.value))}
+                  className="w-full accent-blue-500"
+                />
+              </div>
+              
+              <button onClick={resetCanvas} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-xs py-2 rounded-lg flex items-center justify-center">
+                <Undo className="w-3 h-3 mr-1" /> Reset Frame
+              </button>
+              
+              <button onClick={saveChanges} disabled={isProcessing} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center mt-2">
+                <Save className="w-4 h-4 mr-2" /> Save Changes
+              </button>
+            </div>
+          )}
           
           {mode === 'cleanup' && (
             <div className="space-y-4 pt-4 border-t border-neutral-800">
@@ -634,8 +829,20 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   placeholder="Ex: Remove the watermark and reconstruct the shoe..."
-                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2 text-sm text-white h-24 resize-none focus:outline-none focus:border-blue-500"
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2 text-sm text-white h-24 resize-none focus:outline-none focus:border-blue-500 mb-3"
                 />
+              </div>
+
+              <div>
+                <label className="text-xs text-neutral-400 block mb-1">AI Model</label>
+                <select
+                  value={inpaintModel}
+                  onChange={(e) => setInpaintModel(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                >
+                  <option value="gemini-3.1-flash-image-preview">Nano Banana Inpaint (Flash)</option>
+                  <option value="gemini-3-pro-image-preview">Nano Banana Pro Inpaint (Pro)</option>
+                </select>
               </div>
               
               {!hasApiKey ? (
@@ -665,7 +872,16 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
         </div>
         
         {/* Canvas Area */}
-        <div className="flex-1 bg-neutral-950 flex items-center justify-center p-4 overflow-hidden relative" ref={containerRef}>
+        <div className="flex-1 bg-neutral-950 flex items-center justify-center p-4 overflow-hidden relative group" ref={containerRef}>
+          {hasPrev && (
+            <button 
+              onClick={() => handleNavigate('prev')}
+              className="absolute left-4 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
+            >
+              <ChevronLeft className="w-6 h-6" />
+            </button>
+          )}
+
           <div className="relative flex items-center justify-center w-full h-full">
             <div className="relative inline-flex items-center justify-center max-w-full max-h-full">
               {/* Background pattern for transparency */}
@@ -687,6 +903,7 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
                   mode === 'inpaint' ? 'cursor-crosshair' : 
                   mode === 'watermark' ? 'cursor-crosshair' : 
                   mode === 'color' ? 'cursor-crosshair' : 
+                  mode === 'magicWand' ? 'cursor-crosshair' : 
                   'pointer-events-none'
                 }`}
                 onPointerDown={handlePointerDown}
@@ -697,8 +914,49 @@ export default function FrameEditor({ frame, onUpdateFrame, onClose, ffmpeg }: F
               />
             </div>
           </div>
+
+          {hasNext && (
+            <button 
+              onClick={() => handleNavigate('next')}
+              className="absolute right-4 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
+            >
+              <ChevronRight className="w-6 h-6" />
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Confirmation Modal */}
+      {showConfirmModal && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 rounded-xl p-6 max-w-md w-full border border-neutral-800 shadow-2xl">
+            <h3 className="text-lg font-medium text-white mb-2">Unsaved Changes</h3>
+            <p className="text-neutral-400 text-sm mb-6">
+              You have unsaved changes on this frame. Do you want to save them before moving to the next frame?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setShowConfirmModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-300 hover:bg-neutral-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleConfirmDiscardAndNavigate}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-red-400 hover:bg-red-400/10 transition-colors"
+              >
+                Discard
+              </button>
+              <button 
+                onClick={handleConfirmSaveAndNavigate}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+              >
+                Save & Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -68,6 +68,22 @@ export default function App() {
       setVideoUrl(URL.createObjectURL(file));
       setGifUrl('');
       setWatermarkRect(null);
+      setFrames([]);
+      setSelectedFrame(null);
+    }
+  };
+
+  const clearFfmpegFrames = async () => {
+    try {
+      const ffmpeg = ffmpegRef.current;
+      const files = await ffmpeg.listDir('/');
+      for (const file of files) {
+        if (typeof file.name === 'string' && file.name.startsWith('frame_') && file.name.endsWith('.png')) {
+          await ffmpeg.deleteFile(file.name);
+        }
+      }
+    } catch (e) {
+      console.warn("Error clearing ffmpeg frames", e);
     }
   };
 
@@ -142,6 +158,7 @@ export default function App() {
     
     try {
       const ffmpeg = ffmpegRef.current;
+      await clearFfmpegFrames();
       await ffmpeg.writeFile('input.mp4', await fetchFile(videoFile));
 
       if (interactionMode === 'ai') {
@@ -236,7 +253,7 @@ export default function App() {
         ]);
 
       } else {
-        setProcessingStatus('Applying filters...');
+        setProcessingStatus('Applying filters and extracting frames...');
         let vf = '';
         
         // If a watermark area is selected, draw a box of the target color over it
@@ -263,13 +280,39 @@ export default function App() {
         const sim = (similarity / 100).toFixed(2);
         const blnd = (blend / 100).toFixed(2);
 
-        vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd},split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128`;
+        vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd}`;
 
         await ffmpeg.exec([
           '-i', 'input.mp4',
           '-an', // Ignorar stream de audio
           '-sn', // Ignorar subtítulos
           '-vf', vf,
+          'frame_%04d.png'
+        ]);
+
+        // Read all frames to state for editing
+        const updatedFiles = await ffmpeg.listDir('/');
+        const updatedFrameFiles = updatedFiles
+          .filter(f => typeof f.name === 'string' && f.name.startsWith('frame_') && f.name.endsWith('.png'))
+          .sort((a, b) => a.name.localeCompare(b.name));
+          
+        const newFrames = [];
+        for (let i = 0; i < updatedFrameFiles.length; i++) {
+          setProcessingStatus(`Loading frame ${i + 1} of ${updatedFrameFiles.length}...`);
+          setProgress(Math.round((i / updatedFrameFiles.length) * 100));
+          const file = updatedFrameFiles[i];
+          const data = await ffmpeg.readFile(file.name);
+          const blob = new Blob([data], { type: 'image/png' });
+          const url = URL.createObjectURL(blob);
+          newFrames.push({ filename: file.name, url });
+        }
+        setFrames(newFrames);
+
+        setProcessingStatus('Generating final GIF...');
+        await ffmpeg.exec([
+          '-framerate', fps.toString(),
+          '-i', 'frame_%04d.png',
+          '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
           '-c:v', 'gif',
           'output.gif'
         ]);
@@ -620,7 +663,7 @@ export default function App() {
               )}
 
               {/* Frames Editor Section */}
-              {frames.length > 0 && interactionMode === 'ai' && (
+              {frames.length > 0 && (
                 <div className="bg-neutral-900 p-6 rounded-2xl border border-neutral-800 animate-in fade-in slide-in-from-bottom-4 duration-500">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-xl font-semibold flex items-center">
@@ -657,7 +700,9 @@ export default function App() {
             <div className="w-full h-full max-w-6xl">
               <FrameEditor 
                 frame={selectedFrame} 
+                frames={frames}
                 onUpdateFrame={handleUpdateFrame}
+                onSelectFrame={setSelectedFrame}
                 onClose={() => setSelectedFrame(null)}
                 ffmpeg={ffmpegRef.current}
               />
