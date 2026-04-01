@@ -1,0 +1,5 @@
+{
+  "name": "Video to Transparent GIF",
+  "description": "Herramienta para convertir videos MP4 a GIFs con fondo transparente seleccionando un color clave.",
+  "requestFramePermissions": []
+}
