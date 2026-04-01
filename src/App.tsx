@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed } from 'lucide-react';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
 import coreURL from '@ffmpeg/core?url';
@@ -15,11 +15,19 @@ export default function App() {
   const [gifUrl, setGifUrl] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [targetColor, setTargetColor] = useState('#00FF00');
+  
+  // Settings
+  const [targetColor, setTargetColor] = useState('#FFFFFF');
   const [similarity, setSimilarity] = useState(30); // 0-100
   const [blend, setBlend] = useState(10); // 0-100
   const [fps, setFps] = useState(12); // 1-30
   const [scale, setScale] = useState(480); // width
+
+  // Interaction Mode
+  const [interactionMode, setInteractionMode] = useState<'color' | 'watermark'>('color');
+  const [watermarkRect, setWatermarkRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
 
   const ffmpegRef = useRef(new FFmpeg());
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -51,37 +59,71 @@ export default function App() {
       setVideoFile(file);
       setVideoUrl(URL.createObjectURL(file));
       setGifUrl('');
+      setWatermarkRect(null);
     }
   };
 
   const rgbToHex = (r: number, g: number, b: number) => {
-    return "#" + (1 << 24 | r << 16 | g << 8 | b).toString(16).padStart(6, '0').toUpperCase();
+    return "#" + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1).toUpperCase();
   };
 
-  const handleVideoClick = (e: React.MouseEvent<HTMLVideoElement>) => {
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
+    if (!video) return;
 
-    const rect = video.getBoundingClientRect();
+    const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    const scaleX = video.videoWidth / rect.width;
-    const scaleY = video.videoHeight / rect.height;
+    if (interactionMode === 'color') {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
 
-    const actualX = x * scaleX;
-    const actualY = y * scaleY;
+      const scaleX = video.videoWidth / rect.width;
+      const scaleY = video.videoHeight / rect.height;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+      const actualX = x * scaleX;
+      const actualY = y * scaleY;
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const pixel = ctx.getImageData(actualX, actualY, 1, 1).data;
-    const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
-    setTargetColor(hex);
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const pixel = ctx.getImageData(actualX, actualY, 1, 1).data;
+      const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
+      setTargetColor(hex);
+    } else if (interactionMode === 'watermark') {
+      setStartPos({ x, y });
+      setIsDrawing(true);
+      setWatermarkRect({ x, y, w: 0, h: 0 });
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (interactionMode === 'watermark' && isDrawing && startPos) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const currentX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+      const currentY = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+      
+      setWatermarkRect({
+        x: Math.min(startPos.x, currentX),
+        y: Math.min(startPos.y, currentY),
+        w: Math.abs(currentX - startPos.x),
+        h: Math.abs(currentY - startPos.y)
+      });
+    }
+  };
+
+  const handlePointerUp = () => {
+    if (interactionMode === 'watermark' && isDrawing) {
+      setIsDrawing(false);
+      // If the rect is too small, just clear it
+      if (watermarkRect && (watermarkRect.w < 5 || watermarkRect.h < 5)) {
+        setWatermarkRect(null);
+      }
+    }
   };
 
   const convertToGif = async () => {
@@ -92,14 +134,38 @@ export default function App() {
       const ffmpeg = ffmpegRef.current;
       await ffmpeg.writeFile('input.mp4', await fetchFile(videoFile));
 
+      let vf = '';
+      
+      // If a watermark area is selected, draw a box of the target color over it
+      // so the colorkey filter will make it transparent.
+      if (watermarkRect && watermarkRect.w > 0 && watermarkRect.h > 0) {
+        const video = videoRef.current;
+        if (video) {
+          // We need to get the actual DOM rect of the video element to calculate the scale
+          const rect = video.getBoundingClientRect();
+          const scaleX = video.videoWidth / rect.width;
+          const scaleY = video.videoHeight / rect.height;
+
+          const actualX = Math.round(watermarkRect.x * scaleX);
+          const actualY = Math.round(watermarkRect.y * scaleY);
+          const actualW = Math.max(1, Math.round(watermarkRect.w * scaleX));
+          const actualH = Math.max(1, Math.round(watermarkRect.h * scaleY));
+
+          const boxColor = targetColor.replace('#', '0x');
+          vf += `drawbox=x=${actualX}:y=${actualY}:w=${actualW}:h=${actualH}:color=${boxColor}:t=fill,`;
+        }
+      }
+
       const colorHex = targetColor.replace('#', '0x');
       const sim = (similarity / 100).toFixed(2);
       const blnd = (blend / 100).toFixed(2);
 
-      const vf = `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd},split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128`;
+      vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd},split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128`;
 
       await ffmpeg.exec([
         '-i', 'input.mp4',
+        '-an', // Ignorar stream de audio
+        '-sn', // Ignorar subtítulos
         '-vf', vf,
         '-c:v', 'gif',
         'output.gif'
@@ -121,6 +187,7 @@ export default function App() {
     setVideoUrl('');
     setGifUrl('');
     setProgress(0);
+    setWatermarkRect(null);
   };
 
   return (
@@ -128,7 +195,7 @@ export default function App() {
       <div className="max-w-6xl mx-auto space-y-8">
         <header className="border-b border-neutral-800 pb-6">
           <h1 className="text-3xl font-bold tracking-tight">Video a GIF Transparente</h1>
-          <p className="text-neutral-400 mt-2">Convierte videos MP4 en GIFs con fondo transparente. Selecciona el color a eliminar directamente desde el video.</p>
+          <p className="text-neutral-400 mt-2">Convierte videos MP4 en GIFs con fondo transparente. Elimina colores y marcas de agua fácilmente.</p>
         </header>
 
         {!loaded ? (
@@ -142,10 +209,17 @@ export default function App() {
             {/* Left Column: Upload & Preview */}
             <div className="space-y-6">
               <div className="bg-neutral-900 p-6 rounded-2xl border border-neutral-800">
-                <h2 className="text-xl font-semibold mb-4 flex items-center">
-                  <Video className="w-5 h-5 mr-2 text-blue-400" />
-                  1. Sube tu Video
-                </h2>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-semibold flex items-center">
+                    <Video className="w-5 h-5 mr-2 text-blue-400" />
+                    1. Sube tu Video
+                  </h2>
+                  {videoUrl && (
+                    <button onClick={reset} className="text-sm text-neutral-400 hover:text-white flex items-center transition-colors">
+                      <RefreshCw className="w-4 h-4 mr-1.5" /> Cambiar video
+                    </button>
+                  )}
+                </div>
                 
                 {!videoUrl ? (
                   <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-neutral-700 border-dashed rounded-xl cursor-pointer hover:bg-neutral-800/50 transition-colors">
@@ -158,23 +232,76 @@ export default function App() {
                   </label>
                 ) : (
                   <div className="space-y-4">
-                    <div className="relative group rounded-xl overflow-hidden border border-neutral-800 bg-black">
+                    <div className="flex bg-neutral-950 p-1 rounded-lg border border-neutral-800 w-fit">
+                      <button
+                        onClick={() => setInteractionMode('color')}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center ${interactionMode === 'color' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                      >
+                        <MousePointer2 className="w-4 h-4 mr-1.5" />
+                        Elegir Color
+                      </button>
+                      <button
+                        onClick={() => setInteractionMode('watermark')}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center ${interactionMode === 'watermark' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                      >
+                        <SquareDashed className="w-4 h-4 mr-1.5" />
+                        Marcar Zona
+                      </button>
+                    </div>
+
+                    <div 
+                      className={`relative rounded-xl overflow-hidden border border-neutral-800 bg-black select-none touch-none ${interactionMode === 'color' ? 'cursor-crosshair' : 'cursor-crosshair'}`}
+                      onPointerDown={handlePointerDown}
+                      onPointerMove={handlePointerMove}
+                      onPointerUp={handlePointerUp}
+                      onPointerLeave={handlePointerUp}
+                    >
                       <video 
                         ref={videoRef}
                         src={videoUrl} 
-                        controls 
-                        className="w-full h-auto max-h-[400px] object-contain cursor-crosshair"
-                        onClick={handleVideoClick}
+                        autoPlay
+                        loop
+                        muted
+                        playsInline
+                        className="w-full h-auto block pointer-events-none"
                         crossOrigin="anonymous"
                       />
-                      <div className="absolute top-4 left-4 bg-black/70 backdrop-blur-md text-xs px-3 py-1.5 rounded-full flex items-center border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                        <MousePointer2 className="w-3 h-3 mr-1.5" />
-                        Haz clic en el color a eliminar
+                      
+                      {/* Watermark Selection Rectangle */}
+                      {watermarkRect && (
+                        <div 
+                          className="absolute border-2 border-red-500 bg-red-500/20 pointer-events-none"
+                          style={{
+                            left: watermarkRect.x,
+                            top: watermarkRect.y,
+                            width: watermarkRect.w,
+                            height: watermarkRect.h
+                          }}
+                        />
+                      )}
+
+                      <div className="absolute top-4 left-4 bg-black/70 backdrop-blur-md text-xs px-3 py-1.5 rounded-full flex items-center border border-white/10 opacity-0 hover:opacity-100 transition-opacity pointer-events-none">
+                        {interactionMode === 'color' 
+                          ? 'Haz clic en el color a eliminar' 
+                          : 'Arrastra para marcar la zona a eliminar'}
                       </div>
                     </div>
-                    <button onClick={reset} className="text-sm text-neutral-400 hover:text-white flex items-center transition-colors">
-                      <RefreshCw className="w-4 h-4 mr-1.5" /> Cambiar video
-                    </button>
+
+                    {interactionMode === 'watermark' && (
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-neutral-400">
+                          {watermarkRect ? 'Zona seleccionada.' : 'Arrastra sobre el video para seleccionar la marca de agua.'}
+                        </span>
+                        {watermarkRect && (
+                          <button 
+                            onClick={() => setWatermarkRect(null)}
+                            className="text-red-400 hover:text-red-300 flex items-center"
+                          >
+                            <Eraser className="w-4 h-4 mr-1" /> Borrar zona
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -203,7 +330,7 @@ export default function App() {
                         {targetColor.toUpperCase()}
                       </div>
                     </div>
-                    <p className="text-xs text-neutral-500 mt-2">También puedes hacer clic directamente en el video para seleccionar el color.</p>
+                    <p className="text-xs text-neutral-500 mt-2">Por defecto es blanco (#FFFFFF). Puedes cambiarlo aquí o haciendo clic en el video.</p>
                   </div>
 
                   <div>
