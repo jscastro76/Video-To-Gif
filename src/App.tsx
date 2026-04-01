@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles } from 'lucide-react';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
 import coreURL from '@ffmpeg/core?url';
@@ -15,6 +15,7 @@ export default function App() {
   const [gifUrl, setGifUrl] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [processingStatus, setProcessingStatus] = useState('');
   
   // Settings
   const [targetColor, setTargetColor] = useState('#FFFFFF');
@@ -24,7 +25,7 @@ export default function App() {
   const [scale, setScale] = useState(480); // width
 
   // Interaction Mode
-  const [interactionMode, setInteractionMode] = useState<'color' | 'watermark'>('color');
+  const [interactionMode, setInteractionMode] = useState<'color' | 'watermark' | 'ai'>('color');
   const [watermarkRect, setWatermarkRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
@@ -130,46 +131,117 @@ export default function App() {
     if (!videoFile) return;
     setIsProcessing(true);
     setProgress(0);
+    setProcessingStatus('Iniciando...');
+    
     try {
       const ffmpeg = ffmpegRef.current;
       await ffmpeg.writeFile('input.mp4', await fetchFile(videoFile));
 
-      let vf = '';
-      
-      // If a watermark area is selected, draw a box of the target color over it
-      // so the colorkey filter will make it transparent.
-      if (watermarkRect && watermarkRect.w > 0 && watermarkRect.h > 0) {
-        const video = videoRef.current;
-        if (video) {
-          // We need to get the actual DOM rect of the video element to calculate the scale
-          const rect = video.getBoundingClientRect();
-          const scaleX = video.videoWidth / rect.width;
-          const scaleY = video.videoHeight / rect.height;
+      if (interactionMode === 'ai') {
+        setProcessingStatus('Cargando modelo de IA (puede tardar la primera vez)...');
+        
+        // Dynamically import transformers to save bundle size
+        const { pipeline, env } = await import('@huggingface/transformers');
+        env.allowLocalModels = false;
+        
+        // Load ModNet model for background removal
+        const segmenter = await pipeline('background-removal', 'Xenova/modnet', {
+          revision: 'main'
+        });
 
-          const actualX = Math.round(watermarkRect.x * scaleX);
-          const actualY = Math.round(watermarkRect.y * scaleY);
-          const actualW = Math.max(1, Math.round(watermarkRect.w * scaleX));
-          const actualH = Math.max(1, Math.round(watermarkRect.h * scaleY));
+        setProcessingStatus('Extrayendo fotogramas del video...');
+        // Extract frames
+        await ffmpeg.exec([
+          '-i', 'input.mp4',
+          '-vf', `fps=${fps},scale=${scale}:-1`,
+          'frame_%04d.png'
+        ]);
 
-          const boxColor = targetColor.replace('#', '0x');
-          vf += `drawbox=x=${actualX}:y=${actualY}:w=${actualW}:h=${actualH}:color=${boxColor}:t=fill,`;
+        const files = await ffmpeg.listDir('/');
+        const frameFiles = files
+          .filter(f => typeof f.name === 'string' && f.name.startsWith('frame_') && f.name.endsWith('.png'))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error("No 2d context");
+
+        for (let i = 0; i < frameFiles.length; i++) {
+          setProcessingStatus(`Procesando fotograma ${i + 1} de ${frameFiles.length}...`);
+          setProgress(Math.round((i / frameFiles.length) * 100));
+
+          const file = frameFiles[i];
+          const data = await ffmpeg.readFile(file.name);
+          const blob = new Blob([data], { type: 'image/png' });
+          const imgUrl = URL.createObjectURL(blob);
+
+          const img = new Image();
+          img.src = imgUrl;
+          await new Promise(r => img.onload = r);
+
+          // Run background removal
+          const output = await segmenter(imgUrl);
+          
+          // The background-removal pipeline returns a RawImage with the alpha channel already applied
+          const outBlob = await output.toBlob('image/png');
+
+          // Save back to FFmpeg
+          if (outBlob) {
+            const outBuffer = await outBlob.arrayBuffer();
+            await ffmpeg.writeFile(file.name, new Uint8Array(outBuffer));
+          }
+
+          URL.revokeObjectURL(imgUrl);
         }
+
+        setProcessingStatus('Generando GIF final...');
+        await ffmpeg.exec([
+          '-framerate', fps.toString(),
+          '-i', 'frame_%04d.png',
+          '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
+          '-c:v', 'gif',
+          'output.gif'
+        ]);
+
+      } else {
+        setProcessingStatus('Aplicando filtros...');
+        let vf = '';
+        
+        // If a watermark area is selected, draw a box of the target color over it
+        // so the colorkey filter will make it transparent.
+        if (watermarkRect && watermarkRect.w > 0 && watermarkRect.h > 0) {
+          const video = videoRef.current;
+          if (video) {
+            // We need to get the actual DOM rect of the video element to calculate the scale
+            const rect = video.getBoundingClientRect();
+            const scaleX = video.videoWidth / rect.width;
+            const scaleY = video.videoHeight / rect.height;
+
+            const actualX = Math.round(watermarkRect.x * scaleX);
+            const actualY = Math.round(watermarkRect.y * scaleY);
+            const actualW = Math.max(1, Math.round(watermarkRect.w * scaleX));
+            const actualH = Math.max(1, Math.round(watermarkRect.h * scaleY));
+
+            const boxColor = targetColor.replace('#', '0x');
+            vf += `drawbox=x=${actualX}:y=${actualY}:w=${actualW}:h=${actualH}:color=${boxColor}:t=fill,`;
+          }
+        }
+
+        const colorHex = targetColor.replace('#', '0x');
+        const sim = (similarity / 100).toFixed(2);
+        const blnd = (blend / 100).toFixed(2);
+
+        vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd},split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128`;
+
+        await ffmpeg.exec([
+          '-i', 'input.mp4',
+          '-an', // Ignorar stream de audio
+          '-sn', // Ignorar subtítulos
+          '-vf', vf,
+          '-c:v', 'gif',
+          'output.gif'
+        ]);
       }
-
-      const colorHex = targetColor.replace('#', '0x');
-      const sim = (similarity / 100).toFixed(2);
-      const blnd = (blend / 100).toFixed(2);
-
-      vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd},split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128`;
-
-      await ffmpeg.exec([
-        '-i', 'input.mp4',
-        '-an', // Ignorar stream de audio
-        '-sn', // Ignorar subtítulos
-        '-vf', vf,
-        '-c:v', 'gif',
-        'output.gif'
-      ]);
 
       const data = await ffmpeg.readFile('output.gif');
       const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'image/gif' }));
@@ -179,6 +251,7 @@ export default function App() {
       alert("Hubo un error al procesar el video. Revisa la consola para más detalles.");
     } finally {
       setIsProcessing(false);
+      setProcessingStatus('');
     }
   };
 
@@ -247,6 +320,13 @@ export default function App() {
                         <SquareDashed className="w-4 h-4 mr-1.5" />
                         Marcar Zona
                       </button>
+                      <button
+                        onClick={() => setInteractionMode('ai')}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center ${interactionMode === 'ai' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                      >
+                        <Sparkles className="w-4 h-4 mr-1.5" />
+                        IA Automática
+                      </button>
                     </div>
 
                     <div 
@@ -283,7 +363,9 @@ export default function App() {
                       <div className="absolute top-4 left-4 bg-black/70 backdrop-blur-md text-xs px-3 py-1.5 rounded-full flex items-center border border-white/10 opacity-0 hover:opacity-100 transition-opacity pointer-events-none">
                         {interactionMode === 'color' 
                           ? 'Haz clic en el color a eliminar' 
-                          : 'Arrastra para marcar la zona a eliminar'}
+                          : interactionMode === 'watermark'
+                          ? 'Arrastra para marcar la zona a eliminar'
+                          : 'La IA detectará automáticamente al personaje principal'}
                       </div>
                     </div>
 
@@ -316,51 +398,68 @@ export default function App() {
                 </h2>
                 
                 <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm font-medium text-neutral-300 mb-2">Color a eliminar</label>
-                    <div className="flex items-center space-x-4">
-                      <input 
-                        type="color" 
-                        value={targetColor} 
-                        onChange={(e) => setTargetColor(e.target.value)}
-                        className="w-12 h-12 rounded cursor-pointer bg-transparent border-0 p-0"
-                      />
-                      <div className="flex-1 px-4 py-3 bg-neutral-950 rounded-lg border border-neutral-800 font-mono text-sm flex items-center">
-                        <div className="w-4 h-4 rounded-full mr-3 border border-neutral-700" style={{ backgroundColor: targetColor }}></div>
-                        {targetColor.toUpperCase()}
+                  {interactionMode !== 'ai' ? (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-neutral-300 mb-2">Color a eliminar</label>
+                        <div className="flex items-center space-x-4">
+                          <input 
+                            type="color" 
+                            value={targetColor} 
+                            onChange={(e) => setTargetColor(e.target.value)}
+                            className="w-12 h-12 rounded cursor-pointer bg-transparent border-0 p-0"
+                          />
+                          <div className="flex-1 px-4 py-3 bg-neutral-950 rounded-lg border border-neutral-800 font-mono text-sm flex items-center">
+                            <div className="w-4 h-4 rounded-full mr-3 border border-neutral-700" style={{ backgroundColor: targetColor }}></div>
+                            {targetColor.toUpperCase()}
+                          </div>
+                        </div>
+                        <p className="text-xs text-neutral-500 mt-2">Por defecto es blanco (#FFFFFF). Puedes cambiarlo aquí o haciendo clic en el video.</p>
                       </div>
-                    </div>
-                    <p className="text-xs text-neutral-500 mt-2">Por defecto es blanco (#FFFFFF). Puedes cambiarlo aquí o haciendo clic en el video.</p>
-                  </div>
 
-                  <div>
-                    <div className="flex justify-between mb-2">
-                      <label className="text-sm font-medium text-neutral-300">Margen (Tolerancia)</label>
-                      <span className="text-sm text-neutral-400">{similarity}%</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      min="1" max="100" 
-                      value={similarity} 
-                      onChange={(e) => setSimilarity(Number(e.target.value))}
-                      className="w-full accent-blue-500"
-                    />
-                    <p className="text-xs text-neutral-500 mt-1">Aumenta si quedan bordes del color original.</p>
-                  </div>
+                      <div>
+                        <div className="flex justify-between mb-2">
+                          <label className="text-sm font-medium text-neutral-300">Margen (Tolerancia)</label>
+                          <span className="text-sm text-neutral-400">{similarity}%</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min="1" max="100" 
+                          value={similarity} 
+                          onChange={(e) => setSimilarity(Number(e.target.value))}
+                          className="w-full accent-blue-500"
+                        />
+                        <p className="text-xs text-neutral-500 mt-1">Aumenta si quedan bordes del color original.</p>
+                      </div>
 
-                  <div>
-                    <div className="flex justify-between mb-2">
-                      <label className="text-sm font-medium text-neutral-300">Suavizado (Blend)</label>
-                      <span className="text-sm text-neutral-400">{blend}%</span>
+                      <div>
+                        <div className="flex justify-between mb-2">
+                          <label className="text-sm font-medium text-neutral-300">Suavizado (Blend)</label>
+                          <span className="text-sm text-neutral-400">{blend}%</span>
+                        </div>
+                        <input 
+                          type="range" 
+                          min="0" max="100" 
+                          value={blend} 
+                          onChange={(e) => setBlend(Number(e.target.value))}
+                          className="w-full accent-blue-500"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="bg-blue-500/10 border border-blue-500/20 p-5 rounded-xl">
+                      <h3 className="text-blue-400 font-medium mb-2 flex items-center">
+                        <Sparkles className="w-5 h-5 mr-2" />
+                        Detección por IA Activada
+                      </h3>
+                      <p className="text-sm text-neutral-300 leading-relaxed">
+                        El modelo avanzado <strong>ModNet</strong> analizará cada fotograma para recortar al personaje principal con alta precisión.
+                      </p>
+                      <p className="text-xs text-neutral-500 mt-3 bg-black/20 p-3 rounded-lg">
+                        ⚠️ Este proceso requiere descargar el modelo la primera vez (~116MB) y puede tardar un poco dependiendo de la duración del video y la resolución.
+                      </p>
                     </div>
-                    <input 
-                      type="range" 
-                      min="0" max="100" 
-                      value={blend} 
-                      onChange={(e) => setBlend(Number(e.target.value))}
-                      className="w-full accent-blue-500"
-                    />
-                  </div>
+                  )}
 
                   <div className="grid grid-cols-2 gap-4 pt-2 border-t border-neutral-800 mt-4">
                     <div className="mt-4">
@@ -390,10 +489,15 @@ export default function App() {
                   className="w-full mt-8 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white font-medium py-3 px-4 rounded-xl transition-colors flex items-center justify-center"
                 >
                   {isProcessing ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                      Procesando... {progress}%
-                    </>
+                    <div className="flex flex-col items-center">
+                      <div className="flex items-center">
+                        <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                        Procesando... {progress}%
+                      </div>
+                      {processingStatus && (
+                        <span className="text-xs text-blue-200 mt-1 font-normal opacity-80">{processingStatus}</span>
+                      )}
+                    </div>
                   ) : (
                     <>
                       <Play className="w-5 h-5 mr-2" />
