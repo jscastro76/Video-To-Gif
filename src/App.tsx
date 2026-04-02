@@ -314,6 +314,7 @@ export default function App() {
           '-i', 'frame_%04d.png',
           '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
           '-c:v', 'gif',
+          '-gifflags', '-offsetting',
           'output.gif'
         ]);
 
@@ -384,6 +385,7 @@ export default function App() {
           '-i', 'frame_%04d.png',
           '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
           '-c:v', 'gif',
+          '-gifflags', '-offsetting',
           'output.gif'
         ]);
       }
@@ -410,6 +412,7 @@ export default function App() {
         '-i', 'frame_%04d.png',
         '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
         '-c:v', 'gif',
+        '-gifflags', '-offsetting',
         '-y',
         'output.gif'
       ]);
