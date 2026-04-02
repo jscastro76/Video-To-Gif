@@ -14,6 +14,7 @@ export default function App() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>('');
   const [gifUrl, setGifUrl] = useState<string>('');
+  const [isGif, setIsGif] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [processingStatus, setProcessingStatus] = useState('');
@@ -38,14 +39,18 @@ export default function App() {
   const [isRebuilding, setIsRebuilding] = useState(false);
 
   const ffmpegRef = useRef(new FFmpeg());
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const mediaRef = useRef<HTMLVideoElement & HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const logParserRef = useRef<((msg: string) => void) | null>(null);
 
   useEffect(() => {
     const load = async () => {
       try {
         const ffmpeg = ffmpegRef.current;
-        ffmpeg.on('log', ({ message }) => console.log(message));
+        ffmpeg.on('log', ({ message }) => {
+          console.log(message);
+          if (logParserRef.current) logParserRef.current(message);
+        });
         ffmpeg.on('progress', ({ progress }) => setProgress(Math.round(progress * 100)));
         
         // Load FFmpeg using local URLs
@@ -61,15 +66,71 @@ export default function App() {
     load();
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file && file.type.startsWith('video/')) {
+    if (file && (file.type.startsWith('video/') || file.type === 'image/gif')) {
+      const isGifFile = file.type === 'image/gif';
       setVideoFile(file);
-      setVideoUrl(URL.createObjectURL(file));
+      const url = URL.createObjectURL(file);
+      setVideoUrl(url);
       setGifUrl('');
       setWatermarkRect(null);
       setFrames([]);
       setSelectedFrame(null);
+      setIsGif(isGifFile);
+
+      if (isGifFile) {
+        setGifUrl(url);
+        setIsProcessing(true);
+        setProcessingStatus('Analyzing GIF...');
+        
+        try {
+          const ffmpeg = ffmpegRef.current;
+          await clearFfmpegFrames();
+          await ffmpeg.writeFile('input.gif', await fetchFile(file));
+          
+          let detectedFps = 12;
+          let detectedWidth = 480;
+          
+          logParserRef.current = (message: string) => {
+            const fpsMatch = message.match(/(\d+(?:\.\d+)?)\s+fps/);
+            if (fpsMatch) detectedFps = Math.round(parseFloat(fpsMatch[1]));
+            
+            const resMatch = message.match(/Video:.*?,.*?,\s*(\d+)x(\d+)/);
+            if (resMatch) detectedWidth = parseInt(resMatch[1], 10);
+          };
+          
+          await ffmpeg.exec(['-i', 'input.gif', '-f', 'null', '-']);
+          logParserRef.current = null;
+          
+          setFps(detectedFps || 12);
+          setScale(detectedWidth || 480);
+          
+          setProcessingStatus('Extracting frames...');
+          await ffmpeg.exec([
+            '-i', 'input.gif',
+            'frame_%04d.png'
+          ]);
+          
+          const files = await ffmpeg.listDir('/');
+          const frameFiles = files
+            .filter(f => typeof f.name === 'string' && f.name.startsWith('frame_') && f.name.endsWith('.png'))
+            .sort((a, b) => a.name.localeCompare(b.name));
+            
+          const newFrames = [];
+          for (const f of frameFiles) {
+            const data = await ffmpeg.readFile(f.name);
+            const blob = new Blob([data], { type: 'image/png' });
+            newFrames.push({ filename: f.name, url: URL.createObjectURL(blob) });
+          }
+          setFrames(newFrames);
+        } catch (err) {
+          console.error("Error processing GIF:", err);
+        } finally {
+          setIsProcessing(false);
+          setProcessingStatus('');
+        }
+      }
     }
   };
 
@@ -92,8 +153,8 @@ export default function App() {
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    const video = videoRef.current;
-    if (!video) return;
+    const media = mediaRef.current;
+    if (!media) return;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -103,18 +164,21 @@ export default function App() {
       const canvas = canvasRef.current;
       if (!canvas) return;
 
-      const scaleX = video.videoWidth / rect.width;
-      const scaleY = video.videoHeight / rect.height;
+      const mediaWidth = isGif ? (media as HTMLImageElement).naturalWidth : (media as HTMLVideoElement).videoWidth;
+      const mediaHeight = isGif ? (media as HTMLImageElement).naturalHeight : (media as HTMLVideoElement).videoHeight;
+
+      const scaleX = mediaWidth / rect.width;
+      const scaleY = mediaHeight / rect.height;
 
       const actualX = x * scaleX;
       const actualY = y * scaleY;
 
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      canvas.width = mediaWidth;
+      canvas.height = mediaHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(media, 0, 0, canvas.width, canvas.height);
       const pixel = ctx.getImageData(actualX, actualY, 1, 1).data;
       const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
       setTargetColor(hex);
@@ -159,7 +223,8 @@ export default function App() {
     try {
       const ffmpeg = ffmpegRef.current;
       await clearFfmpegFrames();
-      await ffmpeg.writeFile('input.mp4', await fetchFile(videoFile));
+      const inputFile = isGif ? 'input.gif' : 'input.mp4';
+      await ffmpeg.writeFile(inputFile, await fetchFile(videoFile));
 
       if (interactionMode === 'ai') {
         setProcessingStatus('Loading AI model (may take a while the first time)...');
@@ -173,10 +238,10 @@ export default function App() {
           revision: 'main'
         });
 
-        setProcessingStatus('Extracting frames from video...');
+        setProcessingStatus('Extracting frames from media...');
         // Extract frames
         await ffmpeg.exec([
-          '-i', 'input.mp4',
+          '-i', inputFile,
           '-vf', `fps=${fps},scale=${scale}:-1`,
           'frame_%04d.png'
         ]);
@@ -259,12 +324,15 @@ export default function App() {
         // If a watermark area is selected, draw a box of the target color over it
         // so the colorkey filter will make it transparent.
         if (watermarkRect && watermarkRect.w > 0 && watermarkRect.h > 0) {
-          const video = videoRef.current;
-          if (video) {
+          const media = mediaRef.current;
+          if (media) {
             // We need to get the actual DOM rect of the video element to calculate the scale
-            const rect = video.getBoundingClientRect();
-            const scaleX = video.videoWidth / rect.width;
-            const scaleY = video.videoHeight / rect.height;
+            const rect = media.getBoundingClientRect();
+            const mediaWidth = isGif ? (media as HTMLImageElement).naturalWidth : (media as HTMLVideoElement).videoWidth;
+            const mediaHeight = isGif ? (media as HTMLImageElement).naturalHeight : (media as HTMLVideoElement).videoHeight;
+
+            const scaleX = mediaWidth / rect.width;
+            const scaleY = mediaHeight / rect.height;
 
             const actualX = Math.round(watermarkRect.x * scaleX);
             const actualY = Math.round(watermarkRect.y * scaleY);
@@ -282,13 +350,15 @@ export default function App() {
 
         vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd}`;
 
-        await ffmpeg.exec([
-          '-i', 'input.mp4',
+        const execArgs = [
+          '-i', inputFile,
           '-an', // Ignorar stream de audio
           '-sn', // Ignorar subtítulos
           '-vf', vf,
           'frame_%04d.png'
-        ]);
+        ];
+        
+        await ffmpeg.exec(execArgs);
 
         // Read all frames to state for editing
         const updatedFiles = await ffmpeg.listDir('/');
@@ -415,9 +485,9 @@ export default function App() {
                     <div className="flex flex-col items-center justify-center pt-5 pb-6">
                       <Upload className="w-10 h-10 text-neutral-400 mb-3" />
                       <p className="mb-2 text-sm text-neutral-400"><span className="font-semibold text-neutral-200">Click to upload</span> or drag and drop</p>
-                      <p className="text-xs text-neutral-500">MP4, WebM, MOV</p>
+                      <p className="text-xs text-neutral-500">MP4, WebM, MOV, GIF</p>
                     </div>
-                    <input type="file" className="hidden" accept="video/*" onChange={handleFileChange} />
+                    <input type="file" className="hidden" accept="video/*,image/gif" onChange={handleFileChange} />
                   </label>
                 ) : (
                   <div className="space-y-4">
@@ -452,16 +522,26 @@ export default function App() {
                       onPointerUp={handlePointerUp}
                       onPointerLeave={handlePointerUp}
                     >
-                      <video 
-                        ref={videoRef}
-                        src={videoUrl} 
-                        autoPlay
-                        loop
-                        muted
-                        playsInline
-                        className="w-full h-auto block pointer-events-none"
-                        crossOrigin="anonymous"
-                      />
+                      {isGif ? (
+                        <img
+                          ref={mediaRef}
+                          src={videoUrl}
+                          alt="Source GIF"
+                          className="w-full h-auto block pointer-events-none"
+                          crossOrigin="anonymous"
+                        />
+                      ) : (
+                        <video 
+                          ref={mediaRef}
+                          src={videoUrl} 
+                          autoPlay
+                          loop
+                          muted
+                          playsInline
+                          className="w-full h-auto block pointer-events-none"
+                          crossOrigin="anonymous"
+                        />
+                      )}
                       
                       {/* Watermark Selection Rectangle */}
                       {watermarkRect && (
