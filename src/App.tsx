@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid } from 'lucide-react';
 import FrameEditor from './components/FrameEditor';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
@@ -44,10 +44,73 @@ export default function App() {
   const [selectedFrame, setSelectedFrame] = useState<{filename: string, url: string} | null>(null);
   const [isRebuilding, setIsRebuilding] = useState(false);
 
+  // Sprite Sheet
+  const [spriteSheetUrl, setSpriteSheetUrl] = useState<string>('');
+  const [spriteCols, setSpriteCols] = useState<number>(0);
+  const [spriteRows, setSpriteRows] = useState<number>(0);
+  const [isGeneratingSprite, setIsGeneratingSprite] = useState(false);
+
   const ffmpegRef = useRef(new FFmpeg());
   const mediaRef = useRef<HTMLVideoElement & HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const logParserRef = useRef<((msg: string) => void) | null>(null);
+
+  useEffect(() => {
+    if (frames.length > 0) {
+      const cols = Math.ceil(Math.sqrt(frames.length));
+      const rows = Math.ceil(frames.length / cols);
+      setSpriteCols(cols);
+      setSpriteRows(rows);
+      setSpriteSheetUrl('');
+    }
+  }, [frames.length]);
+
+  const generateSpriteSheet = async () => {
+    if (frames.length === 0) return;
+    setIsGeneratingSprite(true);
+    try {
+      // Load first frame to get dimensions
+      const firstFrameImg = new Image();
+      firstFrameImg.src = frames[0].url;
+      await new Promise(r => firstFrameImg.onload = r);
+      
+      const frameW = firstFrameImg.width;
+      const frameH = firstFrameImg.height;
+      
+      const canvas = document.createElement('canvas');
+      canvas.width = spriteCols * frameW;
+      canvas.height = spriteRows * frameH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error("No 2d context");
+      
+      // Load all images
+      const images = await Promise.all(frames.map(frame => {
+        return new Promise<HTMLImageElement>((resolve) => {
+          const img = new Image();
+          img.src = frame.url;
+          img.onload = () => resolve(img);
+        });
+      }));
+      
+      // Draw images
+      images.forEach((img, idx) => {
+        const col = idx % spriteCols;
+        const row = Math.floor(idx / spriteCols);
+        ctx.drawImage(img, col * frameW, row * frameH);
+      });
+      
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        setSpriteSheetUrl(url);
+      }
+    } catch (err) {
+      console.error("Error generating sprite sheet:", err);
+      alert("Error generating sprite sheet");
+    } finally {
+      setIsGeneratingSprite(false);
+    }
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -367,6 +430,7 @@ export default function App() {
         await ffmpeg.exec([
           '-i', inputFile,
           '-vf', extractVf,
+          '-pix_fmt', 'rgba',
           'frame_%04d.png'
         ]);
 
@@ -461,9 +525,13 @@ export default function App() {
 
           const boxColor = targetColor.replace('#', '0x');
           vf += `drawbox=x=${actualX}:y=${actualY}:w=${actualW}:h=${actualH}:color=${boxColor}:t=fill,`;
-        }
-
-        if (targetColor !== '#000000' || interactionMode === 'color') {
+          
+          // Always apply colorkey for watermark to remove the box
+          const colorHex = targetColor.replace('#', '0x');
+          const sim = Math.max(0.01, similarity / 100).toFixed(2);
+          const blnd = (blend / 100).toFixed(2);
+          vf += `colorkey=${colorHex}:${sim}:${blnd},`;
+        } else if (similarity > 0 && (targetColor !== '#000000' || interactionMode === 'color')) {
           const colorHex = targetColor.replace('#', '0x');
           const sim = (similarity / 100).toFixed(2);
           const blnd = (blend / 100).toFixed(2);
@@ -481,6 +549,7 @@ export default function App() {
           '-an', // Ignorar stream de audio
           '-sn', // Ignorar subtítulos
           '-vf', vf,
+          '-pix_fmt', 'rgba',
           'frame_%04d.png'
         ];
         
@@ -795,12 +864,12 @@ export default function App() {
                         </div>
                         <input 
                           type="range" 
-                          min="1" max="100" 
+                          min="0" max="100" 
                           value={similarity} 
                           onChange={(e) => setSimilarity(Number(e.target.value))}
                           className="w-full accent-blue-500"
                         />
-                        <p className="text-xs text-neutral-500 mt-1">Increase if edges of the original color remain.</p>
+                        <p className="text-xs text-neutral-500 mt-1">Set to 0 to disable color removal. Increase if edges of the original color remain.</p>
                       </div>
 
                       <div>
@@ -1008,6 +1077,65 @@ export default function App() {
                         </div>
                       </button>
                     ))}
+                  </div>
+
+                  {/* Sprite Sheet Generator */}
+                  <div className="mt-6 pt-6 border-t border-neutral-800">
+                    <h3 className="text-lg font-medium text-white mb-4">Sprite Sheet Generator</h3>
+                    <div className="flex flex-wrap items-end gap-4 mb-4">
+                      <div>
+                        <label className="block text-xs font-medium text-neutral-400 mb-1">Columns</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={spriteCols}
+                          onChange={(e) => {
+                            const cols = Math.max(1, parseInt(e.target.value) || 1);
+                            setSpriteCols(cols);
+                            setSpriteRows(Math.ceil(frames.length / cols));
+                          }}
+                          className="w-20 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-purple-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-neutral-400 mb-1">Rows</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={spriteRows}
+                          onChange={(e) => {
+                            const rows = Math.max(1, parseInt(e.target.value) || 1);
+                            setSpriteRows(rows);
+                            setSpriteCols(Math.ceil(frames.length / rows));
+                          }}
+                          className="w-20 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-purple-500"
+                        />
+                      </div>
+                      <button
+                        onClick={generateSpriteSheet}
+                        disabled={isGeneratingSprite || frames.length === 0}
+                        className="px-4 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {isGeneratingSprite ? <Loader2 className="w-4 h-4 animate-spin" /> : <Grid className="w-4 h-4" />}
+                        Generate Sprite Sheet
+                      </button>
+                    </div>
+
+                    {spriteSheetUrl && (
+                      <div className="space-y-4">
+                        <div className="bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYNgvwEAIYIRLgM7//2H4PwxjE0A2jGwYvIExGkZjw2hsGIZhGIZhGAYAL+4/wQvP9/QAAAAASUVORK5CYII=')] bg-repeat rounded-xl border border-neutral-800 overflow-hidden flex justify-center p-2">
+                          <img src={spriteSheetUrl} alt="Sprite Sheet" className="max-w-full h-auto object-contain" />
+                        </div>
+                        <a
+                          href={spriteSheetUrl}
+                          download="spritesheet.png"
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-lg transition-colors"
+                        >
+                          <Download className="w-4 h-4" />
+                          Download Sprite Sheet
+                        </a>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
