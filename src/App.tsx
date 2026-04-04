@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3 } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock } from 'lucide-react';
 import FrameEditor from './components/FrameEditor';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
@@ -20,15 +20,20 @@ export default function App() {
   const [processingStatus, setProcessingStatus] = useState('');
   
   // Settings
-  const [targetColor, setTargetColor] = useState('#FFFFFF');
+  const [targetColor, setTargetColor] = useState('#000000');
   const [similarity, setSimilarity] = useState(30); // 0-100
   const [blend, setBlend] = useState(10); // 0-100
   const [fps, setFps] = useState(12); // 1-30
-  const [scale, setScale] = useState(480); // width
+  const [outputWidth, setOutputWidth] = useState(480);
+  const [outputHeight, setOutputHeight] = useState(480);
+  const [crop, setCrop] = useState<{x: number, y: number, w: number, h: number} | null>(null);
+  const [originalDimensions, setOriginalDimensions] = useState<{w: number, h: number} | null>(null);
+  const [cropDragging, setCropDragging] = useState<'nw' | 'ne' | 'sw' | 'se' | 'move' | null>(null);
+  const [cropStart, setCropStart] = useState<{x: number, y: number, cropX: number, cropY: number, cropW: number, cropH: number} | null>(null);
   const [aiThreshold, setAiThreshold] = useState(0); // 0-100
 
   // Interaction Mode
-  const [interactionMode, setInteractionMode] = useState<'color' | 'watermark' | 'ai'>('color');
+  const [interactionMode, setInteractionMode] = useState<'color' | 'watermark' | 'ai' | 'crop'>('color');
   const [watermarkRect, setWatermarkRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
@@ -78,6 +83,8 @@ export default function App() {
       setFrames([]);
       setSelectedFrame(null);
       setIsGif(isGifFile);
+      setOriginalDimensions(null);
+      setCrop(null);
 
       if (isGifFile) {
         setGifUrl(url);
@@ -91,20 +98,29 @@ export default function App() {
           
           let detectedFps = 12;
           let detectedWidth = 480;
+          let detectedHeight = 480;
           
           logParserRef.current = (message: string) => {
             const fpsMatch = message.match(/(\d+(?:\.\d+)?)\s+fps/);
             if (fpsMatch) detectedFps = Math.round(parseFloat(fpsMatch[1]));
             
             const resMatch = message.match(/Video:.*?,.*?,\s*(\d+)x(\d+)/);
-            if (resMatch) detectedWidth = parseInt(resMatch[1], 10);
+            if (resMatch) {
+              detectedWidth = parseInt(resMatch[1], 10);
+              detectedHeight = parseInt(resMatch[2], 10);
+            }
           };
           
           await ffmpeg.exec(['-i', 'input.gif', '-f', 'null', '-']);
           logParserRef.current = null;
           
           setFps(detectedFps || 12);
-          setScale(detectedWidth || 480);
+          const w = detectedWidth || 480;
+          const h = detectedHeight || 480;
+          setOriginalDimensions({ w, h });
+          setCrop({ x: 0, y: 0, w, h });
+          setOutputWidth(w);
+          setOutputHeight(h);
           
           setProcessingStatus('Extracting frames...');
           await ffmpeg.exec([
@@ -148,38 +164,46 @@ export default function App() {
     }
   };
 
+  const handleMediaLoad = () => {
+    const media = mediaRef.current;
+    if (!media) return;
+    const w = isGif ? (media as HTMLImageElement).naturalWidth : (media as HTMLVideoElement).videoWidth;
+    const h = isGif ? (media as HTMLImageElement).naturalHeight : (media as HTMLVideoElement).videoHeight;
+    
+    if (!originalDimensions) {
+      setOriginalDimensions({ w, h });
+      setCrop({ x: 0, y: 0, w, h });
+      setOutputWidth(w);
+      setOutputHeight(h);
+    }
+  };
+
   const rgbToHex = (r: number, g: number, b: number) => {
     return "#" + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1).toUpperCase();
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (cropDragging) return; // Let the crop handle take care of it
     const media = mediaRef.current;
-    if (!media) return;
+    if (!media || !originalDimensions) return;
 
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const scaleX = originalDimensions.w / rect.width;
+    const scaleY = originalDimensions.h / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
 
     if (interactionMode === 'color') {
       const canvas = canvasRef.current;
       if (!canvas) return;
 
-      const mediaWidth = isGif ? (media as HTMLImageElement).naturalWidth : (media as HTMLVideoElement).videoWidth;
-      const mediaHeight = isGif ? (media as HTMLImageElement).naturalHeight : (media as HTMLVideoElement).videoHeight;
-
-      const scaleX = mediaWidth / rect.width;
-      const scaleY = mediaHeight / rect.height;
-
-      const actualX = x * scaleX;
-      const actualY = y * scaleY;
-
-      canvas.width = mediaWidth;
-      canvas.height = mediaHeight;
+      canvas.width = originalDimensions.w;
+      canvas.height = originalDimensions.h;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
       ctx.drawImage(media, 0, 0, canvas.width, canvas.height);
-      const pixel = ctx.getImageData(actualX, actualY, 1, 1).data;
+      const pixel = ctx.getImageData(x, y, 1, 1).data;
       const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
       setTargetColor(hex);
     } else if (interactionMode === 'watermark') {
@@ -190,10 +214,48 @@ export default function App() {
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!originalDimensions) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const scaleX = originalDimensions.w / rect.width;
+    const scaleY = originalDimensions.h / rect.height;
+
+    if (cropDragging && cropStart) {
+      const dx = (e.clientX - cropStart.x) * scaleX;
+      const dy = (e.clientY - cropStart.y) * scaleY;
+      
+      let newX = cropStart.cropX;
+      let newY = cropStart.cropY;
+      let newW = cropStart.cropW;
+      let newH = cropStart.cropH;
+      
+      if (cropDragging === 'move') {
+        newX = Math.max(0, Math.min(cropStart.cropX + dx, originalDimensions.w - newW));
+        newY = Math.max(0, Math.min(cropStart.cropY + dy, originalDimensions.h - newH));
+      } else {
+        if (cropDragging.includes('w')) {
+          newX = Math.max(0, Math.min(cropStart.cropX + dx, cropStart.cropX + cropStart.cropW - 10));
+          newW = cropStart.cropX + cropStart.cropW - newX;
+        }
+        if (cropDragging.includes('e')) {
+          newW = Math.max(10, Math.min(cropStart.cropW + dx, originalDimensions.w - cropStart.cropX));
+        }
+        if (cropDragging.includes('n')) {
+          newY = Math.max(0, Math.min(cropStart.cropY + dy, cropStart.cropY + cropStart.cropH - 10));
+          newH = cropStart.cropY + cropStart.cropH - newY;
+        }
+        if (cropDragging.includes('s')) {
+          newH = Math.max(10, Math.min(cropStart.cropH + dy, originalDimensions.h - cropStart.cropY));
+        }
+      }
+      
+      setCrop({ x: Math.round(newX), y: Math.round(newY), w: Math.round(newW), h: Math.round(newH) });
+      setOutputHeight(Math.max(1, Math.round(outputWidth * (newH / newW))));
+      return;
+    }
+
     if (interactionMode === 'watermark' && isDrawing && startPos) {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const currentX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-      const currentY = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+      const currentX = Math.max(0, Math.min((e.clientX - rect.left) * scaleX, originalDimensions.w));
+      const currentY = Math.max(0, Math.min((e.clientY - rect.top) * scaleY, originalDimensions.h));
       
       setWatermarkRect({
         x: Math.min(startPos.x, currentX),
@@ -205,12 +267,64 @@ export default function App() {
   };
 
   const handlePointerUp = () => {
+    if (cropDragging) {
+      setCropDragging(null);
+      setCropStart(null);
+      return;
+    }
     if (interactionMode === 'watermark' && isDrawing) {
       setIsDrawing(false);
       // If the rect is too small, just clear it
       if (watermarkRect && (watermarkRect.w < 5 || watermarkRect.h < 5)) {
         setWatermarkRect(null);
       }
+    }
+  };
+
+  const handleCropPointerDown = (e: React.PointerEvent, type: 'nw' | 'ne' | 'sw' | 'se' | 'move') => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setCropDragging(type);
+    if (crop) {
+      setCropStart({
+        x: e.clientX,
+        y: e.clientY,
+        cropX: crop.x,
+        cropY: crop.y,
+        cropW: crop.w,
+        cropH: crop.h
+      });
+    }
+  };
+
+  const handleCropPointerUp = (e: React.PointerEvent) => {
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    setCropDragging(null);
+    setCropStart(null);
+  };
+
+  const handleCropInputChange = (dimension: 'w' | 'h', value: number) => {
+    if (!crop || !originalDimensions) return;
+    const val = Math.max(10, value || 0);
+    let newCrop = { ...crop };
+    if (dimension === 'w') {
+      newCrop.w = Math.min(val, originalDimensions.w - crop.x);
+    } else {
+      newCrop.h = Math.min(val, originalDimensions.h - crop.y);
+    }
+    setCrop(newCrop);
+    setOutputHeight(Math.max(1, Math.round(outputWidth * (newCrop.h / newCrop.w))));
+  };
+
+  const handleOutputInputChange = (dimension: 'w' | 'h', value: number) => {
+    if (!crop) return;
+    const val = Math.max(1, value || 0);
+    if (dimension === 'w') {
+      setOutputWidth(val);
+      setOutputHeight(Math.max(1, Math.round(val * (crop.h / crop.w))));
+    } else {
+      setOutputHeight(val);
+      setOutputWidth(Math.max(1, Math.round(val * (crop.w / crop.h))));
     }
   };
 
@@ -238,11 +352,17 @@ export default function App() {
           revision: 'main'
         });
 
+        let extractVf = '';
+        if (crop) {
+          extractVf += `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},`;
+        }
+        extractVf += `scale=${outputWidth}:${outputHeight}:flags=lanczos,fps=${fps}`;
+
         setProcessingStatus('Extracting frames from media...');
         // Extract frames
         await ffmpeg.exec([
           '-i', inputFile,
-          '-vf', `fps=${fps},scale=${scale}:-1`,
+          '-vf', extractVf,
           'frame_%04d.png'
         ]);
 
@@ -325,31 +445,27 @@ export default function App() {
         // If a watermark area is selected, draw a box of the target color over it
         // so the colorkey filter will make it transparent.
         if (watermarkRect && watermarkRect.w > 0 && watermarkRect.h > 0) {
-          const media = mediaRef.current;
-          if (media) {
-            // We need to get the actual DOM rect of the video element to calculate the scale
-            const rect = media.getBoundingClientRect();
-            const mediaWidth = isGif ? (media as HTMLImageElement).naturalWidth : (media as HTMLVideoElement).videoWidth;
-            const mediaHeight = isGif ? (media as HTMLImageElement).naturalHeight : (media as HTMLVideoElement).videoHeight;
+          const actualX = Math.round(watermarkRect.x);
+          const actualY = Math.round(watermarkRect.y);
+          const actualW = Math.max(1, Math.round(watermarkRect.w));
+          const actualH = Math.max(1, Math.round(watermarkRect.h));
 
-            const scaleX = mediaWidth / rect.width;
-            const scaleY = mediaHeight / rect.height;
-
-            const actualX = Math.round(watermarkRect.x * scaleX);
-            const actualY = Math.round(watermarkRect.y * scaleY);
-            const actualW = Math.max(1, Math.round(watermarkRect.w * scaleX));
-            const actualH = Math.max(1, Math.round(watermarkRect.h * scaleY));
-
-            const boxColor = targetColor.replace('#', '0x');
-            vf += `drawbox=x=${actualX}:y=${actualY}:w=${actualW}:h=${actualH}:color=${boxColor}:t=fill,`;
-          }
+          const boxColor = targetColor.replace('#', '0x');
+          vf += `drawbox=x=${actualX}:y=${actualY}:w=${actualW}:h=${actualH}:color=${boxColor}:t=fill,`;
         }
 
-        const colorHex = targetColor.replace('#', '0x');
-        const sim = (similarity / 100).toFixed(2);
-        const blnd = (blend / 100).toFixed(2);
+        if (targetColor !== '#000000' || interactionMode === 'color') {
+          const colorHex = targetColor.replace('#', '0x');
+          const sim = (similarity / 100).toFixed(2);
+          const blnd = (blend / 100).toFixed(2);
+          vf += `colorkey=${colorHex}:${sim}:${blnd},`;
+        }
 
-        vf += `fps=${fps},scale=${scale}:-1:flags=lanczos,colorkey=${colorHex}:${sim}:${blnd}`;
+        if (crop) {
+          vf += `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},`;
+        }
+
+        vf += `scale=${outputWidth}:${outputHeight}:flags=lanczos,fps=${fps}`;
 
         const execArgs = [
           '-i', inputFile,
@@ -516,6 +632,13 @@ export default function App() {
                         <Sparkles className="w-4 h-4 mr-1.5" />
                         Auto AI
                       </button>
+                      <button
+                        onClick={() => setInteractionMode('crop')}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center ${interactionMode === 'crop' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                      >
+                        <Crop className="w-4 h-4 mr-1.5" />
+                        Crop
+                      </button>
                     </div>
 
                     <div 
@@ -530,6 +653,7 @@ export default function App() {
                           ref={mediaRef}
                           src={videoUrl}
                           alt="Source GIF"
+                          onLoad={handleMediaLoad}
                           className="w-full h-auto block pointer-events-none"
                           crossOrigin="anonymous"
                         />
@@ -537,6 +661,7 @@ export default function App() {
                         <video 
                           ref={mediaRef}
                           src={videoUrl} 
+                          onLoadedMetadata={handleMediaLoad}
                           autoPlay
                           loop
                           muted
@@ -547,16 +672,45 @@ export default function App() {
                       )}
                       
                       {/* Watermark Selection Rectangle */}
-                      {watermarkRect && (
+                      {watermarkRect && originalDimensions && (
                         <div 
                           className="absolute border-2 border-red-500 bg-red-500/20 pointer-events-none"
                           style={{
-                            left: watermarkRect.x,
-                            top: watermarkRect.y,
-                            width: watermarkRect.w,
-                            height: watermarkRect.h
+                            left: `${(watermarkRect.x / originalDimensions.w) * 100}%`,
+                            top: `${(watermarkRect.y / originalDimensions.h) * 100}%`,
+                            width: `${(watermarkRect.w / originalDimensions.w) * 100}%`,
+                            height: `${(watermarkRect.h / originalDimensions.h) * 100}%`
                           }}
                         />
+                      )}
+
+                      {/* Crop Overlay */}
+                      {crop && originalDimensions && (
+                        <div className="absolute inset-0 pointer-events-none">
+                          <div className="absolute top-0 left-0 right-0 bg-black/50" style={{ height: `${(crop.y / originalDimensions.h) * 100}%` }} />
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/50" style={{ height: `${((originalDimensions.h - crop.y - crop.h) / originalDimensions.h) * 100}%` }} />
+                          <div className="absolute bg-black/50" style={{ top: `${(crop.y / originalDimensions.h) * 100}%`, bottom: `${((originalDimensions.h - crop.y - crop.h) / originalDimensions.h) * 100}%`, left: 0, width: `${(crop.x / originalDimensions.w) * 100}%` }} />
+                          <div className="absolute bg-black/50" style={{ top: `${(crop.y / originalDimensions.h) * 100}%`, bottom: `${((originalDimensions.h - crop.y - crop.h) / originalDimensions.h) * 100}%`, right: 0, width: `${((originalDimensions.w - crop.x - crop.w) / originalDimensions.w) * 100}%` }} />
+                          
+                          {interactionMode === 'crop' && (
+                            <div 
+                              className="absolute border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.5)] pointer-events-auto cursor-move"
+                              style={{
+                                left: `${(crop.x / originalDimensions.w) * 100}%`,
+                                top: `${(crop.y / originalDimensions.h) * 100}%`,
+                                width: `${(crop.w / originalDimensions.w) * 100}%`,
+                                height: `${(crop.h / originalDimensions.h) * 100}%`
+                              }}
+                              onPointerDown={(e) => handleCropPointerDown(e, 'move')}
+                              onPointerUp={handleCropPointerUp}
+                            >
+                              <div className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border border-black cursor-nwse-resize" onPointerDown={(e) => handleCropPointerDown(e, 'nw')} onPointerUp={handleCropPointerUp} />
+                              <div className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border border-black cursor-nesw-resize" onPointerDown={(e) => handleCropPointerDown(e, 'ne')} onPointerUp={handleCropPointerUp} />
+                              <div className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border border-black cursor-nesw-resize" onPointerDown={(e) => handleCropPointerDown(e, 'sw')} onPointerUp={handleCropPointerUp} />
+                              <div className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border border-black cursor-nwse-resize" onPointerDown={(e) => handleCropPointerDown(e, 'se')} onPointerUp={handleCropPointerUp} />
+                            </div>
+                          )}
+                        </div>
                       )}
 
                       <div className="absolute top-4 left-4 bg-black/70 backdrop-blur-md text-xs px-3 py-1.5 rounded-full flex items-center border border-white/10 opacity-0 hover:opacity-100 transition-opacity pointer-events-none">
@@ -564,6 +718,8 @@ export default function App() {
                           ? 'Click on the color to remove' 
                           : interactionMode === 'watermark'
                           ? 'Drag to mark the area to remove'
+                          : interactionMode === 'crop'
+                          ? 'Drag corners to crop'
                           : 'AI will automatically detect the main character'}
                       </div>
                     </div>
@@ -611,7 +767,7 @@ export default function App() {
                             {targetColor.toUpperCase()}
                           </div>
                         </div>
-                        <p className="text-xs text-neutral-500 mt-2">Default is white (#FFFFFF). You can change it here or by clicking on the video.</p>
+                        <p className="text-xs text-neutral-500 mt-2">Default is black (#000000). You can change it here or by clicking on the video.</p>
                       </div>
 
                       <div>
@@ -675,24 +831,73 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className="grid grid-cols-2 gap-4 pt-2 border-t border-neutral-800 mt-4">
-                    <div className="mt-4">
-                      <label className="block text-sm font-medium text-neutral-300 mb-2">Width (px)</label>
-                      <input 
-                        type="number" 
-                        value={scale} 
-                        onChange={(e) => setScale(Number(e.target.value))}
-                        className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div className="mt-4">
-                      <label className="block text-sm font-medium text-neutral-300 mb-2">FPS</label>
-                      <input 
-                        type="number" 
-                        value={fps} 
-                        onChange={(e) => setFps(Number(e.target.value))}
-                        className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-                      />
+                  <div className="pt-4 border-t border-neutral-800 mt-4">
+                    <h3 className="text-sm font-medium text-neutral-300 mb-3">Dimensions</h3>
+                    
+                    <div className="space-y-4">
+                      {/* Crop Fields */}
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Crop Area (Source)</label>
+                        <div className="flex items-center space-x-2">
+                          <div className="flex-1 flex items-center bg-neutral-950 border border-neutral-800 rounded-lg px-2">
+                            <span className="text-xs text-neutral-500 w-4">W</span>
+                            <input 
+                              type="number" 
+                              value={crop?.w || 0} 
+                              onChange={(e) => handleCropInputChange('w', parseInt(e.target.value))}
+                              className="w-full px-2 py-2 bg-transparent text-sm focus:outline-none"
+                            />
+                          </div>
+                          <div className="flex-1 flex items-center bg-neutral-950 border border-neutral-800 rounded-lg px-2">
+                            <span className="text-xs text-neutral-500 w-4">H</span>
+                            <input 
+                              type="number" 
+                              value={crop?.h || 0} 
+                              onChange={(e) => handleCropInputChange('h', parseInt(e.target.value))}
+                              className="w-full px-2 py-2 bg-transparent text-sm focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Output Fields */}
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Output GIF (Destination)</label>
+                        <div className="flex items-center space-x-2">
+                          <div className="flex-1 flex items-center bg-neutral-950 border border-neutral-800 rounded-lg px-2">
+                            <span className="text-xs text-neutral-500 w-4">W</span>
+                            <input 
+                              type="number" 
+                              value={outputWidth} 
+                              onChange={(e) => handleOutputInputChange('w', parseInt(e.target.value))}
+                              className="w-full px-2 py-2 bg-transparent text-sm focus:outline-none"
+                            />
+                          </div>
+                          <div className="flex-1 flex items-center bg-neutral-950 border border-neutral-800 rounded-lg px-2">
+                            <span className="text-xs text-neutral-500 w-4">H</span>
+                            <input 
+                              type="number" 
+                              value={outputHeight} 
+                              onChange={(e) => handleOutputInputChange('h', parseInt(e.target.value))}
+                              className="w-full px-2 py-2 bg-transparent text-sm focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* FPS */}
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Framerate</label>
+                        <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-lg px-2">
+                          <span className="text-xs text-neutral-500 w-8">FPS</span>
+                          <input 
+                            type="number" 
+                            value={fps} 
+                            onChange={(e) => setFps(Number(e.target.value))}
+                            className="w-full px-2 py-2 bg-transparent text-sm focus:outline-none"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
