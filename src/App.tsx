@@ -26,6 +26,7 @@ export default function App() {
   const [fps, setFps] = useState(12); // 1-30
   const [outputWidth, setOutputWidth] = useState(480);
   const [outputHeight, setOutputHeight] = useState(480);
+  const [resampleMethod, setResampleMethod] = useState('neighbor');
   const [crop, setCrop] = useState<{x: number, y: number, w: number, h: number} | null>(null);
   const [originalDimensions, setOriginalDimensions] = useState<{w: number, h: number} | null>(null);
   const [cropDragging, setCropDragging] = useState<'nw' | 'ne' | 'sw' | 'se' | 'move' | null>(null);
@@ -333,6 +334,7 @@ export default function App() {
     setIsProcessing(true);
     setProgress(0);
     setProcessingStatus('Starting...');
+    setGifUrl('');
     
     try {
       const ffmpeg = ffmpegRef.current;
@@ -356,7 +358,7 @@ export default function App() {
         if (crop) {
           extractVf += `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},`;
         }
-        extractVf += `scale=${outputWidth}:${outputHeight}:flags=lanczos,fps=${fps}`;
+        extractVf += `scale=${outputWidth}:${outputHeight}:flags=${resampleMethod},fps=${fps}`;
 
         setProcessingStatus('Extracting frames from media...');
         // Extract frames
@@ -435,6 +437,7 @@ export default function App() {
           '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
           '-c:v', 'gif',
           '-gifflags', '-offsetting',
+          '-y',
           'output.gif'
         ]);
 
@@ -465,7 +468,7 @@ export default function App() {
           vf += `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},`;
         }
 
-        vf += `scale=${outputWidth}:${outputHeight}:flags=lanczos,fps=${fps}`;
+        vf += `scale=${outputWidth}:${outputHeight}:flags=${resampleMethod},fps=${fps}`;
 
         const execArgs = [
           '-i', inputFile,
@@ -502,6 +505,7 @@ export default function App() {
           '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
           '-c:v', 'gif',
           '-gifflags', '-offsetting',
+          '-y',
           'output.gif'
         ]);
       }
@@ -883,6 +887,21 @@ export default function App() {
                             />
                           </div>
                         </div>
+                      </div>
+
+                      {/* Resample Method */}
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Resample Algorithm</label>
+                        <select 
+                          value={resampleMethod}
+                          onChange={(e) => setResampleMethod(e.target.value)}
+                          className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                        >
+                          <option value="neighbor">Nearest Neighbor (Pixel Art)</option>
+                          <option value="lanczos">Lanczos (High Quality)</option>
+                          <option value="bicubic">Bicubic (Smooth)</option>
+                          <option value="bilinear">Bilinear (Fast)</option>
+                        </select>
                       </div>
                       
                       {/* FPS */}
