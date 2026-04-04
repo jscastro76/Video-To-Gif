@@ -432,11 +432,15 @@ export default function App() {
         }
         setFrames(newFrames);
 
+        const paletteFilter = resampleMethod === 'neighbor'
+          ? 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128:dither=none'
+          : 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128';
+
         setProcessingStatus('Generating final GIF...');
         await ffmpeg.exec([
           '-framerate', fps.toString(),
           '-i', 'frame_%04d.png',
-          '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
+          '-vf', paletteFilter,
           '-c:v', 'gif',
           '-gifflags', '-offsetting',
           '-y',
@@ -500,11 +504,15 @@ export default function App() {
         }
         setFrames(newFrames);
 
+        const paletteFilter = resampleMethod === 'neighbor'
+          ? 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128:dither=none'
+          : 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128';
+
         setProcessingStatus('Generating final GIF...');
         await ffmpeg.exec([
           '-framerate', fps.toString(),
           '-i', 'frame_%04d.png',
-          '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
+          '-vf', paletteFilter,
           '-c:v', 'gif',
           '-gifflags', '-offsetting',
           '-y',
@@ -529,10 +537,14 @@ export default function App() {
     setProcessingStatus('Rebuilding GIF...');
     try {
       const ffmpeg = ffmpegRef.current;
+      const paletteFilter = resampleMethod === 'neighbor'
+        ? 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128:dither=none'
+        : 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128';
+
       await ffmpeg.exec([
         '-framerate', fps.toString(),
         '-i', 'frame_%04d.png',
-        '-vf', 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128',
+        '-vf', paletteFilter,
         '-c:v', 'gif',
         '-gifflags', '-offsetting',
         '-y',
