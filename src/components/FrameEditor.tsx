@@ -516,6 +516,14 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : '';
       const ai = new GoogleGenAI({ apiKey });
       
+      // Calculate closest aspect ratio for the model
+      const aspect = canvas.width / canvas.height;
+      let aspectRatio = "1:1";
+      if (aspect > 1.5) aspectRatio = "16:9";
+      else if (aspect > 1.1) aspectRatio = "4:3";
+      else if (aspect < 0.6) aspectRatio = "9:16";
+      else if (aspect < 0.9) aspectRatio = "3:4";
+
       const response = await ai.models.generateContent({
         model: inpaintModel,
         contents: {
@@ -531,25 +539,38 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
             },
           ],
         },
+        config: {
+          imageConfig: {
+            aspectRatio: aspectRatio as any,
+          }
+        }
       });
       
       let newImageBase64 = '';
+      let mimeType = 'image/jpeg';
       for (const part of response.candidates?.[0]?.content?.parts || []) {
         if (part.inlineData) {
           newImageBase64 = part.inlineData.data;
+          if (part.inlineData.mimeType) {
+            mimeType = part.inlineData.mimeType;
+          }
           break;
         }
       }
       
       if (newImageBase64) {
         const img = new Image();
-        img.src = `data:image/png;base64,${newImageBase64}`;
-        await new Promise(r => img.onload = r);
+        img.src = `data:${mimeType};base64,${newImageBase64}`;
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = () => reject(new Error("Failed to load the image returned by AI."));
+        });
         
         const mainCtx = canvas.getContext('2d');
         if (mainCtx) {
           mainCtx.clearRect(0, 0, canvas.width, canvas.height);
-          mainCtx.drawImage(img, 0, 0);
+          // Scale the returned image to fit the canvas exactly
+          mainCtx.drawImage(img, 0, 0, canvas.width, canvas.height);
         }
         clearMask();
         setHasUnsavedChanges(true);
