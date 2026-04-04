@@ -335,6 +335,8 @@ export default function App() {
     setProgress(0);
     setProcessingStatus('Starting...');
     setGifUrl('');
+    setFrames([]);
+    setSelectedFrame(null);
     
     try {
       const ffmpeg = ffmpegRef.current;
