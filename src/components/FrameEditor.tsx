@@ -513,7 +513,8 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       
       // Initialize Gemini
       // @ts-ignore
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : '';
+      const ai = new GoogleGenAI({ apiKey });
       
       const response = await ai.models.generateContent({
         model: inpaintModel,
@@ -555,9 +556,21 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       } else {
         throw new Error("No image received from AI.");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert("Error processing with AI. Make sure you have selected your API Key.");
+      const errMsg = err.message || String(err);
+      if (errMsg.includes("Requested entity was not found")) {
+        setHasApiKey(false);
+        alert("API Key not found or invalid. Please select your API Key again.");
+        // @ts-ignore
+        if (window.aistudio?.openSelectKey) {
+          // @ts-ignore
+          await window.aistudio.openSelectKey();
+          setHasApiKey(true);
+        }
+      } else {
+        alert(`Error processing with AI: ${errMsg}. Make sure you have selected your API Key.`);
+      }
     } finally {
       setIsProcessing(false);
     }
