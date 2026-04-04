@@ -568,9 +568,32 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
         
         const mainCtx = canvas.getContext('2d');
         if (mainCtx) {
-          mainCtx.clearRect(0, 0, canvas.width, canvas.height);
-          // Scale the returned image to fit the canvas exactly
-          mainCtx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          // Get original image data
+          const originalData = mainCtx.getImageData(0, 0, canvas.width, canvas.height);
+          
+          // Draw AI image to a temporary canvas to get its pixel data
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = canvas.width;
+          tempCanvas.height = canvas.height;
+          const tempCtx = tempCanvas.getContext('2d');
+          
+          if (tempCtx) {
+            // Scale the returned image to fit the canvas exactly
+            tempCtx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const aiData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
+            
+            // Only replace pixels where the mask was drawn
+            for (let i = 0; i < maskData.data.length; i += 4) {
+              if (maskData.data[i+3] > 0) { // If mask has alpha (was painted)
+                originalData.data[i] = aiData.data[i];         // R
+                originalData.data[i+1] = aiData.data[i+1];     // G
+                originalData.data[i+2] = aiData.data[i+2];     // B
+                originalData.data[i+3] = aiData.data[i+3];     // A
+              }
+            }
+            
+            mainCtx.putImageData(originalData, 0, 0);
+          }
         }
         clearMask();
         setHasUnsavedChanges(true);
