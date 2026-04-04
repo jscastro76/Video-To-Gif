@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 interface FrameEditorProps {
@@ -42,6 +42,10 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<'prev' | 'next' | null>(null);
 
+  // Zoom & Pan
+  const [zoom, setZoom] = useState(1);
+  const [imageDimensions, setImageDimensions] = useState<{w: number, h: number} | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -67,6 +71,25 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
     }
   };
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    
+    const handleNativeWheel = (e: WheelEvent) => {
+      // Zoom on wheel
+      if (e.ctrlKey || e.metaKey || !e.shiftKey) {
+        // If they just use the wheel, we zoom. If they hold Shift, they might want to scroll horizontally.
+        // Let's make wheel zoom by default, as requested.
+        e.preventDefault();
+        const zoomDelta = e.deltaY > 0 ? -0.1 : 0.1;
+        setZoom(z => Math.max(0.1, Math.min(5, z + zoomDelta)));
+      }
+    };
+    
+    container.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => container.removeEventListener('wheel', handleNativeWheel);
+  }, []);
+
   const resetCanvas = () => {
     const img = new Image();
     img.src = frame.url;
@@ -74,6 +97,8 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       const canvas = canvasRef.current;
       const maskCanvas = maskCanvasRef.current;
       if (!canvas || !maskCanvas) return;
+      
+      setImageDimensions({ w: img.width, h: img.height });
       
       canvas.width = img.width;
       canvas.height = img.height;
@@ -580,7 +605,21 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
     <div className="flex flex-col h-full bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden relative">
       <div className="p-4 border-b border-neutral-800 flex justify-between items-center bg-neutral-950">
         <h3 className="font-medium text-neutral-200">Editing: {frame.filename} {hasUnsavedChanges && <span className="text-yellow-500 text-xs ml-2">(Unsaved Changes)</span>}</h3>
-        <button onClick={onClose} className="text-sm text-neutral-400 hover:text-white">Close Editor</button>
+        <div className="flex items-center space-x-6">
+          <div className="flex items-center space-x-2">
+            <ZoomOut className="w-4 h-4 text-neutral-400" />
+            <input 
+              type="range" 
+              min="10" max="500" 
+              value={zoom * 100} 
+              onChange={(e) => setZoom(Number(e.target.value) / 100)}
+              className="w-24 accent-blue-500"
+            />
+            <ZoomIn className="w-4 h-4 text-neutral-400" />
+            <span className="text-xs text-neutral-400 w-12 text-right">{Math.round(zoom * 100)}%</span>
+          </div>
+          <button onClick={onClose} className="text-sm text-neutral-400 hover:text-white">Close Editor</button>
+        </div>
       </div>
       
       <div className="flex flex-1 overflow-hidden">
@@ -872,53 +911,59 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
         </div>
         
         {/* Canvas Area */}
-        <div className="flex-1 bg-neutral-950 flex items-center justify-center p-4 overflow-hidden relative group" ref={containerRef}>
+        <div className="flex-1 relative flex overflow-hidden bg-neutral-950 group">
           {hasPrev && (
             <button 
               onClick={() => handleNavigate('prev')}
-              className="absolute left-4 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
+              className="absolute left-4 top-1/2 -translate-y-1/2 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
             >
               <ChevronLeft className="w-6 h-6" />
             </button>
           )}
 
-          <div className="relative flex items-center justify-center w-full h-full">
-            <div className="relative inline-flex items-center justify-center max-w-full max-h-full">
-              {/* Background pattern for transparency */}
-              <div className="absolute inset-0" style={{ 
-                backgroundImage: 'repeating-conic-gradient(#333 0% 25%, #222 0% 50%)', 
-                backgroundSize: '20px 20px',
-                zIndex: 0
-              }} />
-              
-              <canvas 
-                ref={canvasRef} 
-                className="relative z-10"
-                style={{ display: 'block', maxWidth: '100%', maxHeight: '100%' }}
-              />
-              
-              <canvas 
-                ref={maskCanvasRef}
-                className={`absolute top-0 left-0 z-20 ${
-                  mode === 'inpaint' ? 'cursor-crosshair' : 
-                  mode === 'watermark' ? 'cursor-crosshair' : 
-                  mode === 'color' ? 'cursor-crosshair' : 
-                  mode === 'magicWand' ? 'cursor-crosshair' : 
-                  'pointer-events-none'
-                }`}
-                onPointerDown={handlePointerDown}
-                onPointerMove={handlePointerMove}
-                onPointerUp={handlePointerUp}
-                onPointerLeave={handlePointerUp}
-                style={{ display: 'block', width: '100%', height: '100%' }}
-              />
+          <div className="flex-1 overflow-auto" ref={containerRef}>
+            <div className="min-w-full min-h-full flex items-center justify-center p-8 w-max h-max">
+              <div 
+                className="relative flex-shrink-0"
+                style={{
+                  width: imageDimensions ? `${imageDimensions.w * zoom}px` : 'auto',
+                  height: imageDimensions ? `${imageDimensions.h * zoom}px` : 'auto',
+                }}
+              >
+                {/* Background pattern for transparency */}
+                <div className="absolute inset-0" style={{ 
+                  backgroundImage: 'repeating-conic-gradient(#333 0% 25%, #222 0% 50%)', 
+                  backgroundSize: '20px 20px',
+                  zIndex: 0
+                }} />
+                
+                <canvas 
+                  ref={canvasRef} 
+                  className="absolute inset-0 w-full h-full z-10"
+                />
+                
+                <canvas 
+                  ref={maskCanvasRef}
+                  className={`absolute inset-0 w-full h-full z-20 ${
+                    mode === 'inpaint' ? 'cursor-crosshair' : 
+                    mode === 'watermark' ? 'cursor-crosshair' : 
+                    mode === 'color' ? 'cursor-crosshair' : 
+                    mode === 'magicWand' ? 'cursor-crosshair' : 
+                    'pointer-events-none'
+                  }`}
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  onPointerLeave={handlePointerUp}
+                />
+              </div>
             </div>
           </div>
 
           {hasNext && (
             <button 
               onClick={() => handleNavigate('next')}
-              className="absolute right-4 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
+              className="absolute right-4 top-1/2 -translate-y-1/2 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
             >
               <ChevronRight className="w-6 h-6" />
             </button>
