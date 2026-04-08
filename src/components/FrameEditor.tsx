@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
+import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 interface FrameEditorProps {
@@ -452,6 +452,52 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
     }
   };
 
+  const handleFlipHorizontal = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    setIsProcessing(true);
+    try {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = canvas.height;
+      const ctx = tempCanvas.getContext('2d');
+      if (!ctx) throw new Error("No 2d context");
+      
+      // Draw flipped
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(canvas, 0, 0);
+      
+      // Put back to main canvas
+      const mainCtx = canvas.getContext('2d');
+      if (mainCtx) {
+        mainCtx.clearRect(0, 0, canvas.width, canvas.height);
+        mainCtx.drawImage(tempCanvas, 0, 0);
+      }
+      
+      setHasUnsavedChanges(true);
+      
+      // Automatically save changes for flip
+      await new Promise<void>((resolve) => {
+        canvas.toBlob(async (blob) => {
+          if (blob) {
+            const newUrl = URL.createObjectURL(blob);
+            await onUpdateFrame(frame.filename, newUrl, blob);
+            setHasUnsavedChanges(false);
+          }
+          resolve();
+        }, 'image/png');
+      });
+      
+    } catch (err) {
+      console.error("Error flipping image:", err);
+      alert("Error flipping image.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const saveChanges = (): Promise<void> => {
     return new Promise((resolve) => {
       const canvas = canvasRef.current;
@@ -688,6 +734,14 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
               className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${mode === 'view' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
             >
               Normal View
+            </button>
+            <button 
+              onClick={handleFlipHorizontal}
+              disabled={isProcessing}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center hover:bg-neutral-800 text-neutral-300 disabled:opacity-50`}
+            >
+              <FlipHorizontal className="w-4 h-4 mr-2" />
+              Flip Horizontal
             </button>
             <button 
               onClick={() => { setMode('color'); clearMask(); }}

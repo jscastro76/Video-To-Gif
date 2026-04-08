@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal } from 'lucide-react';
 import FrameEditor from './components/FrameEditor';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
@@ -32,6 +32,7 @@ export default function App() {
   const [cropDragging, setCropDragging] = useState<'nw' | 'ne' | 'sw' | 'se' | 'move' | null>(null);
   const [cropStart, setCropStart] = useState<{x: number, y: number, cropX: number, cropY: number, cropW: number, cropH: number} | null>(null);
   const [aiThreshold, setAiThreshold] = useState(0); // 0-100
+  const [flipHorizontal, setFlipHorizontal] = useState(false);
 
   // Interaction Mode
   const [interactionMode, setInteractionMode] = useState<'color' | 'watermark' | 'ai' | 'crop'>('color');
@@ -149,6 +150,7 @@ export default function App() {
       setIsGif(isGifFile);
       setOriginalDimensions(null);
       setCrop(null);
+      setFlipHorizontal(false);
 
       if (isGifFile) {
         setGifUrl(url);
@@ -423,6 +425,9 @@ export default function App() {
         if (crop) {
           extractVf += `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},`;
         }
+        if (flipHorizontal) {
+          extractVf += `hflip,`;
+        }
         extractVf += `scale=${outputWidth}:${outputHeight}:flags=${resampleMethod},fps=${fps}`;
 
         setProcessingStatus('Extracting frames from media...');
@@ -540,6 +545,10 @@ export default function App() {
 
         if (crop) {
           vf += `crop=${crop.w}:${crop.h}:${crop.x}:${crop.y},`;
+        }
+
+        if (flipHorizontal) {
+          vf += `hflip,`;
         }
 
         vf += `scale=${outputWidth}:${outputHeight}:flags=${resampleMethod},fps=${fps}`;
@@ -972,6 +981,18 @@ export default function App() {
                         </div>
                       </div>
 
+                      {/* Flip Horizontal */}
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Orientation</label>
+                        <button
+                          onClick={() => setFlipHorizontal(!flipHorizontal)}
+                          className={`w-full flex items-center justify-center px-3 py-2 rounded-lg text-sm transition-colors border ${flipHorizontal ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'}`}
+                        >
+                          <FlipHorizontal className="w-4 h-4 mr-2" />
+                          {flipHorizontal ? 'Flipped Horizontally' : 'Flip Horizontally'}
+                        </button>
+                      </div>
+                      
                       {/* Resample Method */}
                       <div>
                         <label className="block text-xs text-neutral-500 mb-1">Resample Algorithm</label>
