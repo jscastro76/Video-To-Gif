@@ -380,7 +380,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       ]);
 
       const data = await ffmpeg.readFile('temp_out.png');
-      const outBlob = new Blob([data], { type: 'image/png' });
+      const outBlob = new Blob([new Uint8Array(data as Uint8Array)], { type: 'image/png' });
       const newUrl = URL.createObjectURL(outBlob);
       
       const img = new Image();
@@ -559,7 +559,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       
       // Initialize Gemini
       // @ts-ignore
-      const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : '';
+      const apiKey = typeof process !== 'undefined' && process.env ? (process.env.GEMINI_API_KEY || process.env.API_KEY || '') : '';
       const ai = new GoogleGenAI({ apiKey });
       
       // Calculate closest aspect ratio for the model
@@ -596,7 +596,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       let mimeType = 'image/jpeg';
       for (const part of response.candidates?.[0]?.content?.parts || []) {
         if (part.inlineData) {
-          newImageBase64 = part.inlineData.data;
+          newImageBase64 = part.inlineData.data ?? '';
           if (part.inlineData.mimeType) {
             mimeType = part.inlineData.mimeType;
           }
