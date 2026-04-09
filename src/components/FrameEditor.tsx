@@ -559,7 +559,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       
       // Initialize Gemini
       // @ts-ignore
-      const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : '';
+      const apiKey = process.env.GEMINI_API_KEY || '';
       const ai = new GoogleGenAI({ apiKey });
       
       // Calculate closest aspect ratio for the model
