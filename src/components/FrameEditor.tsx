@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal } from 'lucide-react';
+import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal, Move } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 interface FrameEditorProps {
@@ -13,7 +13,9 @@ interface FrameEditorProps {
 }
 
 export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFrame, onClose, ffmpeg }: FrameEditorProps) {
-  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser'>('view');
+  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser' | 'move'>('view');
+  const [moveOffset, setMoveOffset] = useState({x: 0, y: 0});
+  const [dragStartOffset, setDragStartOffset] = useState({x: 0, y: 0});
   const [threshold, setThreshold] = useState(0);
   const [brushSize, setBrushSize] = useState(20);
   const [prompt, setPrompt] = useState('');
@@ -49,6 +51,8 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const moveSnapshotRef = useRef<HTMLCanvasElement | null>(null);
+  const moveOriginalRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     const checkApiKey = async () => {
@@ -114,6 +118,19 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       if (mctx) {
         mctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
       }
+      // Update move snapshot if in move mode
+      if (mode === 'move') {
+        const snap = document.createElement('canvas');
+        snap.width = canvas.width;
+        snap.height = canvas.height;
+        const snapCtx = snap.getContext('2d');
+        if (snapCtx) {
+          snapCtx.drawImage(canvas, 0, 0);
+          moveOriginalRef.current = snap;
+        }
+        setMoveOffset({x: 0, y: 0});
+      }
+      
       setHasUnsavedChanges(false);
     };
   };
@@ -153,6 +170,79 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   };
 
   useEffect(() => {
+    if (mode === 'move') {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const snap = document.createElement('canvas');
+        snap.width = canvas.width;
+        snap.height = canvas.height;
+        const ctx = snap.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(canvas, 0, 0);
+          moveOriginalRef.current = snap;
+        }
+      }
+      setMoveOffset({x: 0, y: 0});
+    } else {
+      moveOriginalRef.current = null;
+      setMoveOffset({x: 0, y: 0});
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== 'move') return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+        
+        const step = e.ctrlKey || e.metaKey ? 10 : 1;
+        let dx = 0;
+        let dy = 0;
+        
+        if (e.key === 'ArrowUp') dy = -step;
+        if (e.key === 'ArrowDown') dy = step;
+        if (e.key === 'ArrowLeft') dx = -step;
+        if (e.key === 'ArrowRight') dx = step;
+        
+        setMoveOffset(prev => {
+          const newOffsetX = prev.x + dx;
+          const newOffsetY = prev.y + dy;
+          
+          const canvas = canvasRef.current;
+          const ctx = canvas?.getContext('2d');
+          if (canvas && ctx && moveOriginalRef.current) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(moveOriginalRef.current, newOffsetX, newOffsetY);
+          }
+          
+          setHasUnsavedChanges(true);
+          return { x: newOffsetX, y: newOffsetY };
+        });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode === 'move') {
+      const maskCanvas = maskCanvasRef.current;
+      const ctx = maskCanvas?.getContext('2d');
+      if (maskCanvas && ctx && imageDimensions) {
+        ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+        
+        ctx.strokeStyle = '#00aaff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        ctx.strokeRect(moveOffset.x, moveOffset.y, imageDimensions.w, imageDimensions.h);
+        ctx.setLineDash([]);
+      }
+    }
+  }, [moveOffset, mode, imageDimensions]);
+
+  useEffect(() => {
     if (mode === 'cleanup') {
       applyCleanup();
     }
@@ -172,6 +262,16 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (mode === 'move') {
+      setIsDrawing(true);
+      const coords = getCoordinates(e);
+      if (coords) {
+        setStartPos(coords);
+        setDragStartOffset({ ...moveOffset });
+      }
+      return;
+    }
+
     if (mode === 'magicWand') {
       const coords = getCoordinates(e);
       if (!coords) return;
@@ -307,6 +407,27 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (mode === 'move' && isDrawing && startPos && moveOriginalRef.current) {
+      const coords = getCoordinates(e);
+      if (coords) {
+        const dx = Math.round(coords.x - startPos.x);
+        const dy = Math.round(coords.y - startPos.y);
+        
+        const newOffsetX = dragStartOffset.x + dx;
+        const newOffsetY = dragStartOffset.y + dy;
+        
+        setMoveOffset({ x: newOffsetX, y: newOffsetY });
+        
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        if (canvas && ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(moveOriginalRef.current, newOffsetX, newOffsetY);
+        }
+      }
+      return;
+    }
+
     if (mode === 'watermark' && isDrawing && startPos) {
       const coords = getCoordinates(e);
       if (coords) {
@@ -342,6 +463,11 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   };
 
   const handlePointerUp = () => {
+    if (mode === 'move' && isDrawing) {
+      setIsDrawing(false);
+      setHasUnsavedChanges(true);
+      return;
+    }
     if (mode === 'watermark' && isDrawing) {
       setIsDrawing(false);
       if (watermarkRect && (watermarkRect.w < 5 || watermarkRect.h < 5)) {
@@ -813,6 +939,13 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
               Eraser Brush
             </button>
             <button 
+              onClick={() => { setMode('move'); clearMask(); }}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center ${mode === 'move' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
+            >
+              <Move className="w-4 h-4 mr-2" />
+              Move Frame
+            </button>
+            <button 
               onClick={() => { setMode('cleanup'); clearMask(); }}
               className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center ${mode === 'cleanup' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
             >
@@ -1014,6 +1147,29 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
               </button>
             </div>
           )}
+
+          {mode === 'move' && (
+            <div className="space-y-4 pt-4 border-t border-neutral-800">
+              <p className="text-xs text-neutral-400">Click and drag on the image to move the frame around the canvas.</p>
+              <p className="text-xs text-neutral-400">You can also use the <kbd className="bg-neutral-800 px-1 rounded">Arrow Keys</kbd> to move by 1px, or hold <kbd className="bg-neutral-800 px-1 rounded">Ctrl</kbd> to move by 10px.</p>
+              
+              <div className="flex items-center justify-between bg-neutral-950 border border-neutral-800 rounded-lg p-3">
+                <div className="text-center">
+                  <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Offset X</div>
+                  <div className="text-sm font-mono text-blue-400">{moveOffset.x > 0 ? '+' : ''}{moveOffset.x}px</div>
+                </div>
+                <div className="w-px h-8 bg-neutral-800"></div>
+                <div className="text-center">
+                  <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Offset Y</div>
+                  <div className="text-sm font-mono text-blue-400">{moveOffset.y > 0 ? '+' : ''}{moveOffset.y}px</div>
+                </div>
+              </div>
+
+              <button onClick={saveChanges} disabled={isProcessing} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center mt-2">
+                <Save className="w-4 h-4 mr-2" /> Save Changes
+              </button>
+            </div>
+          )}
           
           {mode === 'inpaint' && (
             <div className="space-y-4 pt-4 border-t border-neutral-800">
@@ -1124,6 +1280,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
                     mode === 'watermark' ? 'cursor-crosshair' : 
                     mode === 'color' ? 'cursor-crosshair' : 
                     mode === 'magicWand' ? 'cursor-crosshair' : 
+                    mode === 'move' ? 'cursor-move' : 
                     'pointer-events-none'
                   }`}
                   onPointerDown={handlePointerDown}
