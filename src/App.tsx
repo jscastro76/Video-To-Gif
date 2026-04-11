@@ -654,6 +654,23 @@ export default function App() {
     await rebuildGif();
   };
 
+  const handleDeleteFrame = async (filename: string) => {
+    setFrames(prev => prev.filter(f => f.filename !== filename));
+    
+    // Remove from virtual file system if possible
+    const ffmpeg = ffmpegRef.current;
+    if (ffmpeg) {
+      try {
+        await ffmpeg.deleteFile(filename);
+      } catch (e) {
+        console.warn(`Could not delete ${filename} from virtual FS`, e);
+      }
+    }
+    
+    // Rebuild GIF
+    await rebuildGif();
+  };
+
   const reset = () => {
     setVideoFile(null);
     setVideoUrl('');
@@ -1174,6 +1191,7 @@ export default function App() {
                 onUpdateFrame={handleUpdateFrame}
                 onSelectFrame={setSelectedFrame}
                 onClose={() => setSelectedFrame(null)}
+                onDeleteFrame={handleDeleteFrame}
                 ffmpeg={ffmpegRef.current}
               />
             </div>

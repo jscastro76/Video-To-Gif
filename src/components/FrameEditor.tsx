@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal, Move } from 'lucide-react';
+import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal, Move, Trash2, RotateCcw } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 interface FrameEditorProps {
@@ -9,10 +9,11 @@ interface FrameEditorProps {
   onUpdateFrame: (filename: string, newUrl: string, newBlob: Blob) => void;
   onSelectFrame: (frame: { filename: string; url: string }) => void;
   onClose: () => void;
+  onDeleteFrame?: (filename: string) => void;
   ffmpeg: FFmpeg | null;
 }
 
-export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFrame, onClose, ffmpeg }: FrameEditorProps) {
+export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFrame, onClose, onDeleteFrame, ffmpeg }: FrameEditorProps) {
   const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser' | 'move'>('view');
   const [moveOffset, setMoveOffset] = useState({x: 0, y: 0});
   const [dragStartOffset, setDragStartOffset] = useState({x: 0, y: 0});
@@ -42,6 +43,8 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   // Navigation & Unsaved Changes
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [showDiscardModal, setShowDiscardModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<'prev' | 'next' | null>(null);
 
   // Zoom & Pan
@@ -864,11 +867,68 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
     }
   };
 
+  const handleDiscard = () => {
+    setShowDiscardModal(true);
+  };
+
+  const confirmDiscard = () => {
+    resetCanvas();
+    setShowDiscardModal(false);
+  };
+
+  const handleDeleteFrame = () => {
+    if (frames.length <= 1) {
+      // Use a custom modal or just a toast, but for now we can just return or show a custom alert if needed.
+      // Let's just return for now, or we can add an alert state.
+      // Actually, let's just not do anything if it's the last frame, or we could disable the button.
+      return;
+    }
+    setShowDeleteModal(true);
+  };
+
+  const confirmDelete = () => {
+    let nextFrame = null;
+    if (hasNext) {
+      nextFrame = frames[currentIndex + 1];
+    } else if (hasPrev) {
+      nextFrame = frames[currentIndex - 1];
+    }
+    
+    if (onDeleteFrame) {
+      onDeleteFrame(frame.filename);
+    }
+    
+    if (nextFrame) {
+      onSelectFrame(nextFrame);
+    } else {
+      onClose();
+    }
+    setShowDeleteModal(false);
+  };
+
   return (
     <div className="flex flex-col h-full bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden relative">
       <div className="p-4 border-b border-neutral-800 flex justify-between items-center bg-neutral-950">
         <h3 className="font-medium text-neutral-200">Editing: {frame.filename} {hasUnsavedChanges && <span className="text-yellow-500 text-xs ml-2">(Unsaved Changes)</span>}</h3>
         <div className="flex items-center space-x-6">
+          <div className="flex items-center space-x-2">
+            <button 
+              onClick={handleDiscard} 
+              disabled={!hasUnsavedChanges}
+              className="text-xs px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-md text-white flex items-center transition-colors"
+              title="Discard unsaved changes"
+            >
+              <RotateCcw className="w-3 h-3 mr-1" /> Discard
+            </button>
+            <button 
+              onClick={handleDeleteFrame} 
+              disabled={frames.length <= 1}
+              className="text-xs px-3 py-1.5 bg-red-900/30 hover:bg-red-800/50 text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-md flex items-center transition-colors"
+              title="Delete this frame"
+            >
+              <Trash2 className="w-3 h-3 mr-1" /> Delete Frame
+            </button>
+          </div>
           <div className="flex items-center space-x-2">
             <ZoomOut className="w-4 h-4 text-neutral-400" />
             <input 
@@ -1329,6 +1389,58 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
                 className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors"
               >
                 Save & Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Discard Modal */}
+      {showDiscardModal && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 rounded-xl p-6 max-w-md w-full border border-neutral-800 shadow-2xl">
+            <h3 className="text-lg font-medium text-white mb-2">Discard Changes</h3>
+            <p className="text-neutral-400 text-sm mb-6">
+              Are you sure you want to discard your unsaved changes? This will revert the frame to its original state.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setShowDiscardModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-300 hover:bg-neutral-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmDiscard}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition-colors"
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Modal */}
+      {showDeleteModal && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 rounded-xl p-6 max-w-md w-full border border-neutral-800 shadow-2xl">
+            <h3 className="text-lg font-medium text-white mb-2">Delete Frame</h3>
+            <p className="text-neutral-400 text-sm mb-6">
+              Are you sure you want to delete this frame? This cannot be undone and it will be removed from the final GIF.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button 
+                onClick={() => setShowDeleteModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-300 hover:bg-neutral-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmDelete}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition-colors"
+              >
+                Delete Frame
               </button>
             </div>
           </div>
