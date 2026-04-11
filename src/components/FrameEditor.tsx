@@ -13,7 +13,7 @@ interface FrameEditorProps {
 }
 
 export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFrame, onClose, ffmpeg }: FrameEditorProps) {
-  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand'>('view');
+  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser'>('view');
   const [threshold, setThreshold] = useState(0);
   const [brushSize, setBrushSize] = useState(20);
   const [prompt, setPrompt] = useState('');
@@ -271,6 +271,23 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       return;
     }
 
+    if (mode === 'eraser') {
+      setIsDrawing(true);
+      const coords = getCoordinates(e);
+      if (!coords) return;
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx) return;
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.moveTo(coords.x, coords.y);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = brushSize;
+      ctx.lineTo(coords.x, coords.y);
+      ctx.stroke();
+      return;
+    }
+
     if (mode !== 'inpaint') return;
     setIsDrawing(true);
     const coords = getCoordinates(e);
@@ -303,6 +320,16 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       return;
     }
 
+    if (mode === 'eraser' && isDrawing) {
+      const coords = getCoordinates(e);
+      if (!coords) return;
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx) return;
+      ctx.lineTo(coords.x, coords.y);
+      ctx.stroke();
+      return;
+    }
+
     if (!isDrawing || mode !== 'inpaint') return;
     const coords = getCoordinates(e);
     if (!coords) return;
@@ -320,6 +347,13 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       if (watermarkRect && (watermarkRect.w < 5 || watermarkRect.h < 5)) {
         setWatermarkRect(null);
       }
+      return;
+    }
+    if (mode === 'eraser' && isDrawing) {
+      setIsDrawing(false);
+      const ctx = canvasRef.current?.getContext('2d');
+      if (ctx) ctx.globalCompositeOperation = 'source-over';
+      setHasUnsavedChanges(true);
       return;
     }
     setIsDrawing(false);
@@ -772,6 +806,13 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
               Magic Wand
             </button>
             <button 
+              onClick={() => { setMode('eraser'); clearMask(); }}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center ${mode === 'eraser' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
+            >
+              <Brush className="w-4 h-4 mr-2" />
+              Eraser Brush
+            </button>
+            <button 
               onClick={() => { setMode('cleanup'); clearMask(); }}
               className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center ${mode === 'cleanup' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
             >
@@ -951,6 +992,28 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
               </button>
             </div>
           )}
+
+          {mode === 'eraser' && (
+            <div className="space-y-4 pt-4 border-t border-neutral-800">
+              <div>
+                <div className="flex justify-between mb-1">
+                  <label className="text-xs text-neutral-400">Brush Size</label>
+                  <span className="text-xs text-neutral-400">{brushSize}px</span>
+                </div>
+                <input 
+                  type="range" min="5" max="100" 
+                  value={brushSize} 
+                  onChange={(e) => setBrushSize(Number(e.target.value))}
+                  className="w-full accent-blue-500"
+                />
+              </div>
+              <p className="text-xs text-neutral-400">Click and drag on the image to erase pixels (make them transparent).</p>
+              
+              <button onClick={saveChanges} disabled={isProcessing} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center mt-2">
+                <Save className="w-4 h-4 mr-2" /> Save Changes
+              </button>
+            </div>
+          )}
           
           {mode === 'inpaint' && (
             <div className="space-y-4 pt-4 border-t border-neutral-800">
@@ -1057,6 +1120,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
                   ref={maskCanvasRef}
                   className={`absolute inset-0 w-full h-full z-20 ${
                     mode === 'inpaint' ? 'cursor-crosshair' : 
+                    mode === 'eraser' ? 'cursor-crosshair' : 
                     mode === 'watermark' ? 'cursor-crosshair' : 
                     mode === 'color' ? 'cursor-crosshair' : 
                     mode === 'magicWand' ? 'cursor-crosshair' : 
