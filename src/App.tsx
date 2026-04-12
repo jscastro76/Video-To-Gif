@@ -610,18 +610,32 @@ export default function App() {
     }
   };
 
-  const rebuildGif = async () => {
+  const rebuildGif = async (currentFrames: {filename: string, url: string}[]) => {
+    if (currentFrames.length === 0) {
+      setGifUrl('');
+      return;
+    }
+    
     setIsRebuilding(true);
     setProcessingStatus('Rebuilding GIF...');
     try {
       const ffmpeg = ffmpegRef.current;
+      
+      // Copy frames to a sequential temp list to avoid broken sequences if frames were deleted
+      for (let i = 0; i < currentFrames.length; i++) {
+        const frame = currentFrames[i];
+        const tempName = `temp_frame_${String(i + 1).padStart(4, '0')}.png`;
+        const data = await ffmpeg.readFile(frame.filename);
+        await ffmpeg.writeFile(tempName, data);
+      }
+
       const paletteFilter = resampleMethod === 'neighbor'
         ? 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128:dither=none'
         : 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128';
 
       await ffmpeg.exec([
         '-framerate', fps.toString(),
-        '-i', 'frame_%04d.png',
+        '-i', 'temp_frame_%04d.png',
         '-vf', paletteFilter,
         '-c:v', 'gif',
         '-gifflags', '-offsetting',
@@ -632,6 +646,12 @@ export default function App() {
       const data = await ffmpeg.readFile('output.gif');
       const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'image/gif' }));
       setGifUrl(url);
+      
+      // Cleanup temp files
+      for (let i = 0; i < currentFrames.length; i++) {
+        const tempName = `temp_frame_${String(i + 1).padStart(4, '0')}.png`;
+        await ffmpeg.deleteFile(tempName);
+      }
     } catch (err) {
       console.error(err);
       alert("Error rebuilding the GIF.");
@@ -643,7 +663,8 @@ export default function App() {
 
   const handleUpdateFrame = async (filename: string, newUrl: string, newBlob: Blob) => {
     // Update state
-    setFrames(prev => prev.map(f => f.filename === filename ? { ...f, url: newUrl } : f));
+    const newFrames = frames.map(f => f.filename === filename ? { ...f, url: newUrl } : f);
+    setFrames(newFrames);
     
     // Update in FFmpeg FS
     const ffmpeg = ffmpegRef.current;
@@ -651,11 +672,12 @@ export default function App() {
     await ffmpeg.writeFile(filename, new Uint8Array(outBuffer));
     
     // Rebuild GIF
-    await rebuildGif();
+    await rebuildGif(newFrames);
   };
 
   const handleDeleteFrame = async (filename: string) => {
-    setFrames(prev => prev.filter(f => f.filename !== filename));
+    const newFrames = frames.filter(f => f.filename !== filename);
+    setFrames(newFrames);
     
     // Remove from virtual file system if possible
     const ffmpeg = ffmpegRef.current;
@@ -668,7 +690,7 @@ export default function App() {
     }
     
     // Rebuild GIF
-    await rebuildGif();
+    await rebuildGif(newFrames);
   };
 
   const reset = () => {

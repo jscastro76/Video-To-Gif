@@ -145,31 +145,35 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
 
   // Handle Edge Cleanup
   const applyCleanup = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    
-    const img = new Image();
-    img.src = frame.url;
-    img.onload = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
+    return new Promise<void>((resolve) => {
+      const canvas = canvasRef.current;
+      if (!canvas) { resolve(); return; }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(); return; }
       
-      if (threshold > 0) {
-        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imgData.data;
-        const thresholdValue = (threshold / 100) * 255;
+      const img = new Image();
+      img.src = frame.url;
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
         
-        for (let i = 3; i < data.length; i += 4) {
-          if (data[i] < thresholdValue) {
-            data[i] = 0;
+        if (threshold > 0) {
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const data = imgData.data;
+          const thresholdValue = (threshold / 100) * 255;
+          
+          for (let i = 3; i < data.length; i += 4) {
+            if (data[i] < thresholdValue) {
+              data[i] = 0;
+            }
           }
+          ctx.putImageData(imgData, 0, 0);
+          setHasUnsavedChanges(true);
         }
-        ctx.putImageData(imgData, 0, 0);
-        setHasUnsavedChanges(true);
-      }
-    };
+        resolve();
+      };
+      img.onerror = () => resolve();
+    });
   };
 
   useEffect(() => {
@@ -1180,7 +1184,13 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
                   className="w-full accent-blue-500"
                 />
               </div>
-              <button onClick={saveChanges} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center">
+              <button 
+                onClick={async () => {
+                  await applyCleanup();
+                  saveChanges();
+                }} 
+                className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center"
+              >
                 <Save className="w-4 h-4 mr-2" /> Apply
               </button>
             </div>
