@@ -7,13 +7,14 @@ interface FrameEditorProps {
   frame: { filename: string; url: string };
   frames: { filename: string; url: string }[];
   onUpdateFrame: (filename: string, newUrl: string, newBlob: Blob) => void;
+  onUpdateMultipleFrames?: (updates: {filename: string, newUrl: string, newBlob: Blob}[]) => Promise<void>;
   onSelectFrame: (frame: { filename: string; url: string }) => void;
   onClose: () => void;
   onDeleteFrame?: (filename: string) => void;
   ffmpeg: FFmpeg | null;
 }
 
-export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFrame, onClose, onDeleteFrame, ffmpeg }: FrameEditorProps) {
+export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMultipleFrames, onSelectFrame, onClose, onDeleteFrame, ffmpeg }: FrameEditorProps) {
   const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser' | 'move'>('view');
   const [moveOffset, setMoveOffset] = useState({x: 0, y: 0});
   const [dragStartOffset, setDragStartOffset] = useState({x: 0, y: 0});
@@ -21,6 +22,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
   const [brushSize, setBrushSize] = useState(20);
   const [prompt, setPrompt] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isApplyingAll, setIsApplyingAll] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(true);
   
@@ -174,6 +176,58 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
       };
       img.onerror = () => resolve();
     });
+  };
+
+  const handleApplyAll = async () => {
+    if (!onUpdateMultipleFrames) return;
+    setIsApplyingAll(true);
+    try {
+      const updates: {filename: string, newUrl: string, newBlob: Blob}[] = [];
+      const thresholdValue = (threshold / 100) * 255;
+
+      for (let i = 0; i < frames.length; i++) {
+        const f = frames[i];
+        const img = new Image();
+        img.src = f.url;
+        await new Promise((r) => { img.onload = r; img.onerror = r; });
+
+        const offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = img.width;
+        offscreenCanvas.height = img.height;
+        const offCtx = offscreenCanvas.getContext('2d');
+        if (!offCtx) continue;
+
+        offCtx.drawImage(img, 0, 0);
+
+        if (threshold > 0) {
+          const imgData = offCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+          const data = imgData.data;
+          for (let j = 3; j < data.length; j += 4) {
+            if (data[j] < thresholdValue) {
+              data[j] = 0;
+            }
+          }
+          offCtx.putImageData(imgData, 0, 0);
+        }
+
+        const blob = await new Promise<Blob | null>(r => offscreenCanvas.toBlob(r, 'image/png'));
+        if (blob) {
+          const newUrl = URL.createObjectURL(blob);
+          updates.push({ filename: f.filename, newUrl, newBlob: blob });
+        }
+      }
+
+      await onUpdateMultipleFrames(updates);
+      
+      // Also update current canvas so it reflects the change if we stay on this frame
+      await applyCleanup();
+      setHasUnsavedChanges(false);
+    } catch (e) {
+      console.error(e);
+      alert("Error applying to all frames.");
+    } finally {
+      setIsApplyingAll(false);
+    }
   };
 
   useEffect(() => {
@@ -1189,9 +1243,18 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onSelectFram
                   await applyCleanup();
                   saveChanges();
                 }} 
-                className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center"
+                disabled={isApplyingAll}
+                className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center disabled:opacity-50"
               >
                 <Save className="w-4 h-4 mr-2" /> Apply
+              </button>
+              <button 
+                onClick={handleApplyAll} 
+                disabled={isApplyingAll}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2 rounded-lg flex items-center justify-center disabled:opacity-50"
+              >
+                {isApplyingAll ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Save className="w-4 h-4 mr-2" />}
+                Apply All
               </button>
             </div>
           )}

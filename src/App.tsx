@@ -675,6 +675,25 @@ export default function App() {
     await rebuildGif(newFrames);
   };
 
+  const handleUpdateMultipleFrames = async (updates: {filename: string, newUrl: string, newBlob: Blob}[]) => {
+    // Update state
+    let newFrames = [...frames];
+    for (const update of updates) {
+      newFrames = newFrames.map(f => f.filename === update.filename ? { ...f, url: update.newUrl } : f);
+    }
+    setFrames(newFrames);
+    
+    // Update in FFmpeg FS
+    const ffmpeg = ffmpegRef.current;
+    for (const update of updates) {
+      const outBuffer = await update.newBlob.arrayBuffer();
+      await ffmpeg.writeFile(update.filename, new Uint8Array(outBuffer));
+    }
+    
+    // Rebuild GIF
+    await rebuildGif(newFrames);
+  };
+
   const handleDeleteFrame = async (filename: string) => {
     const newFrames = frames.filter(f => f.filename !== filename);
     setFrames(newFrames);
@@ -1211,6 +1230,7 @@ export default function App() {
                 frame={selectedFrame} 
                 frames={frames}
                 onUpdateFrame={handleUpdateFrame}
+                onUpdateMultipleFrames={handleUpdateMultipleFrames}
                 onSelectFrame={setSelectedFrame}
                 onClose={() => setSelectedFrame(null)}
                 onDeleteFrame={handleDeleteFrame}
