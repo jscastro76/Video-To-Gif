@@ -601,7 +601,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
       ]);
 
       const data = await ffmpeg.readFile('temp_out.png');
-      const outBlob = new Blob([new Uint8Array(data as Uint8Array)], { type: 'image/png' });
+      const outBlob = new Blob([data], { type: 'image/png' });
       const newUrl = URL.createObjectURL(outBlob);
       
       const img = new Image();
@@ -817,7 +817,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
       let mimeType = 'image/jpeg';
       for (const part of response.candidates?.[0]?.content?.parts || []) {
         if (part.inlineData) {
-          newImageBase64 = part.inlineData.data ?? '';
+          newImageBase64 = part.inlineData.data;
           if (part.inlineData.mimeType) {
             mimeType = part.inlineData.mimeType;
           }
