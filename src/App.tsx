@@ -167,7 +167,9 @@ export default function App() {
           let detectedHeight = 480;
           
           logParserRef.current = (message: string) => {
-            const fpsMatch = message.match(/(\d+(?:\.\d+)?)\s+fps/);
+            // Match FPS from stream info line only (e.g. "25 fps," with trailing comma)
+            // to avoid matching progress lines like "frame=  103 fps=25"
+            const fpsMatch = message.match(/(\d+(?:\.\d+)?)\s+fps,/);
             if (fpsMatch) detectedFps = Math.round(parseFloat(fpsMatch[1]));
             
             const resMatch = message.match(/Video:.*?,.*?,\s*(\d+)x(\d+)/);
@@ -754,7 +756,23 @@ export default function App() {
                 </div>
                 
                 {!videoUrl ? (
-                  <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-neutral-700 border-dashed rounded-xl cursor-pointer hover:bg-neutral-800/50 transition-colors">
+                  <label
+                    className="flex flex-col items-center justify-center w-full h-64 border-2 border-neutral-700 border-dashed rounded-xl cursor-pointer hover:bg-neutral-800/50 transition-colors"
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const file = e.dataTransfer.files?.[0];
+                      if (file && (file.type.startsWith('video/') || file.type === 'image/gif')) {
+                        const input = e.currentTarget.querySelector('input[type="file"]') as HTMLInputElement;
+                        if (input) {
+                          const dt = new DataTransfer();
+                          dt.items.add(file);
+                          input.files = dt.files;
+                          input.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                      }
+                    }}
+                  >
                     <div className="flex flex-col items-center justify-center pt-5 pb-6">
                       <Upload className="w-10 h-10 text-neutral-400 mb-3" />
                       <p className="mb-2 text-sm text-neutral-400"><span className="font-semibold text-neutral-200">Click to upload</span> or drag and drop</p>
