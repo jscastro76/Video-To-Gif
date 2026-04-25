@@ -45,11 +45,16 @@ export default function App() {
   const [selectedFrame, setSelectedFrame] = useState<{filename: string, url: string} | null>(null);
   const [isRebuilding, setIsRebuilding] = useState(false);
 
-  // Sprite Sheet
+  // Sprite Sheet (output)
   const [spriteSheetUrl, setSpriteSheetUrl] = useState<string>('');
   const [spriteCols, setSpriteCols] = useState<number>(0);
   const [spriteRows, setSpriteRows] = useState<number>(0);
   const [isGeneratingSprite, setIsGeneratingSprite] = useState(false);
+
+  // Sprite Sheet (input)
+  const [isSpriteSheet, setIsSpriteSheet] = useState(false);
+  const [spriteInputCols, setSpriteInputCols] = useState(4);
+  const [spriteInputRows, setSpriteInputRows] = useState(4);
 
   const ffmpegRef = useRef(new FFmpeg());
   const mediaRef = useRef<HTMLVideoElement & HTMLImageElement>(null);
@@ -138,7 +143,9 @@ export default function App() {
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file && (file.type.startsWith('video/') || file.type === 'image/gif')) {
+    if (!file) return;
+    const isImage = file.type === 'image/png' || file.type === 'image/jpeg' || file.type === 'image/webp';
+    if (file.type.startsWith('video/') || file.type === 'image/gif' || isImage) {
       const isGifFile = file.type === 'image/gif';
       setVideoFile(file);
       const url = URL.createObjectURL(file);
@@ -148,6 +155,7 @@ export default function App() {
       setFrames([]);
       setSelectedFrame(null);
       setIsGif(isGifFile);
+      setIsSpriteSheet(isImage);
       setOriginalDimensions(null);
       setCrop(null);
       setFlipHorizontal(false);
@@ -722,6 +730,88 @@ export default function App() {
     setWatermarkRect(null);
     setFrames([]);
     setSelectedFrame(null);
+    setIsSpriteSheet(false);
+  };
+
+  const convertSpriteSheetToGif = async () => {
+    if (!videoFile || !isSpriteSheet) return;
+    setIsProcessing(true);
+    setProgress(0);
+    setProcessingStatus('Splitting sprite sheet into frames...');
+    setGifUrl('');
+    setFrames([]);
+    setSelectedFrame(null);
+
+    try {
+      // Load image
+      const img = new Image();
+      img.src = videoUrl;
+      await new Promise(r => img.onload = r);
+
+      const frameW = Math.floor(img.naturalWidth / spriteInputCols);
+      const frameH = Math.floor(img.naturalHeight / spriteInputRows);
+      setOutputWidth(frameW);
+      setOutputHeight(frameH);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = frameW;
+      canvas.height = frameH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('No 2d context');
+
+      const ffmpeg = ffmpegRef.current;
+      await clearFfmpegFrames();
+
+      const newFrames: {filename: string, url: string}[] = [];
+      let frameIndex = 1;
+      const totalFrames = spriteInputRows * spriteInputCols;
+
+      for (let row = 0; row < spriteInputRows; row++) {
+        for (let col = 0; col < spriteInputCols; col++) {
+          setProgress(Math.round((frameIndex / totalFrames) * 50));
+          setProcessingStatus(`Extracting frame ${frameIndex} of ${totalFrames}...`);
+
+          ctx.clearRect(0, 0, frameW, frameH);
+          ctx.drawImage(img, col * frameW, row * frameH, frameW, frameH, 0, 0, frameW, frameH);
+
+          const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+          if (blob) {
+            const filename = `frame_${String(frameIndex).padStart(4, '0')}.png`;
+            const buffer = await blob.arrayBuffer();
+            await ffmpeg.writeFile(filename, new Uint8Array(buffer));
+            const url = URL.createObjectURL(blob);
+            newFrames.push({ filename, url });
+          }
+          frameIndex++;
+        }
+      }
+      setFrames(newFrames);
+
+      setProcessingStatus('Generating GIF...');
+      const paletteFilter = resampleMethod === 'neighbor'
+        ? 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128:dither=none'
+        : 'split[s0][s1];[s0]palettegen=reserve_transparent=1[p];[s1][p]paletteuse=alpha_threshold=128';
+
+      await ffmpeg.exec([
+        '-framerate', fps.toString(),
+        '-i', 'frame_%04d.png',
+        '-vf', paletteFilter,
+        '-c:v', 'gif',
+        '-gifflags', '-offsetting',
+        '-y',
+        'output.gif'
+      ]);
+
+      const data = await ffmpeg.readFile('output.gif');
+      const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'image/gif' }));
+      setGifUrl(url);
+    } catch (err) {
+      console.error(err);
+      alert('Error converting sprite sheet to GIF.');
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
   };
 
   return (
@@ -762,7 +852,7 @@ export default function App() {
                     onDrop={(e) => {
                       e.preventDefault();
                       const file = e.dataTransfer.files?.[0];
-                      if (file && (file.type.startsWith('video/') || file.type === 'image/gif')) {
+                      if (file && (file.type.startsWith('video/') || file.type === 'image/gif' || file.type === 'image/png' || file.type === 'image/jpeg' || file.type === 'image/webp')) {
                         const input = e.currentTarget.querySelector('input[type="file"]') as HTMLInputElement;
                         if (input) {
                           const dt = new DataTransfer();
@@ -776,10 +866,20 @@ export default function App() {
                     <div className="flex flex-col items-center justify-center pt-5 pb-6">
                       <Upload className="w-10 h-10 text-neutral-400 mb-3" />
                       <p className="mb-2 text-sm text-neutral-400"><span className="font-semibold text-neutral-200">Click to upload</span> or drag and drop</p>
-                      <p className="text-xs text-neutral-500">MP4, WebM, MOV, GIF</p>
+                      <p className="text-xs text-neutral-500">MP4, WebM, MOV, GIF, PNG, JPG (Sprite Sheet)</p>
                     </div>
-                    <input type="file" className="hidden" accept="video/*,image/gif" onChange={handleFileChange} />
+                    <input type="file" className="hidden" accept="video/*,image/gif,image/png,image/jpeg,image/webp" onChange={handleFileChange} />
                   </label>
+                ) : isSpriteSheet ? (
+                  <div className="space-y-4">
+                    <div className="rounded-xl overflow-hidden border border-neutral-800 bg-black">
+                      <img
+                        src={videoUrl}
+                        alt="Sprite Sheet"
+                        className="w-full h-auto block"
+                      />
+                    </div>
+                  </div>
                 ) : (
                   <div className="space-y-4">
                     <div className="flex bg-neutral-950 p-1 rounded-lg border border-neutral-800 w-fit">
@@ -916,6 +1016,7 @@ export default function App() {
               </div>
 
               {/* Settings Panel Moved Here */}
+              {!isSpriteSheet ? (
               <div className="bg-neutral-900 p-6 rounded-2xl border border-neutral-800">
                 <h2 className="text-xl font-semibold mb-6 flex items-center">
                   <Settings className="w-5 h-5 mr-2 text-blue-400" />
@@ -1100,30 +1201,75 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-
-                <button 
-                  onClick={convertToGif}
-                  disabled={!videoUrl || isProcessing}
-                  className="w-full mt-8 bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white font-medium py-3 px-4 rounded-xl transition-colors flex items-center justify-center"
-                >
-                  {isProcessing ? (
-                    <div className="flex flex-col items-center">
-                      <div className="flex items-center">
-                        <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                        Processing... {progress}%
-                      </div>
-                      {processingStatus && (
-                        <span className="text-xs text-blue-200 mt-1 font-normal opacity-80">{processingStatus}</span>
-                      )}
-                    </div>
-                  ) : (
-                    <>
-                      <Play className="w-5 h-5 mr-2" />
-                      Convert to GIF
-                    </>
-                  )}
-                </button>
               </div>
+              ) : null}
+
+              {isSpriteSheet && videoUrl && (
+                <div className="bg-neutral-900 p-6 rounded-2xl border border-neutral-800">
+                  <h3 className="text-sm font-semibold text-neutral-200 mb-3 flex items-center">
+                    <Grid className="w-4 h-4 mr-1.5 text-purple-400" />
+                    Sprite Sheet Layout
+                  </h3>
+                  <div className="flex gap-4 mb-4">
+                    <div>
+                      <label className="block text-xs text-neutral-500 mb-1">Columns</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={spriteInputCols}
+                        onChange={(e) => setSpriteInputCols(Math.max(1, parseInt(e.target.value) || 1))}
+                        className="w-20 bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-neutral-500 mb-1">Rows</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={spriteInputRows}
+                        onChange={(e) => setSpriteInputRows(Math.max(1, parseInt(e.target.value) || 1))}
+                        className="w-20 bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-neutral-500 mb-1">FPS</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={fps}
+                        onChange={(e) => setFps(Math.max(1, Number(e.target.value)))}
+                        className="w-20 bg-neutral-950 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-neutral-500">
+                    Total frames: {spriteInputCols * spriteInputRows}
+                  </p>
+                </div>
+              )}
+
+              <button 
+                onClick={isSpriteSheet ? convertSpriteSheetToGif : convertToGif}
+                disabled={!videoUrl || isProcessing}
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white font-medium py-3 px-4 rounded-xl transition-colors flex items-center justify-center"
+              >
+                {isProcessing ? (
+                  <div className="flex flex-col items-center">
+                    <div className="flex items-center">
+                      <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                      Processing... {progress}%
+                    </div>
+                    {processingStatus && (
+                      <span className="text-xs text-blue-200 mt-1 font-normal opacity-80">{processingStatus}</span>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <Play className="w-5 h-5 mr-2" />
+                    {isSpriteSheet ? 'Convert Sprite Sheet to GIF' : 'Convert to GIF'}
+                  </>
+                )}
+              </button>
             </div>
 
             {/* Right Column: Result */}
