@@ -23,6 +23,8 @@ export default function App() {
   const [targetColor, setTargetColor] = useState('#000000');
   const [similarity, setSimilarity] = useState(30); // 0-100
   const [blend, setBlend] = useState(10); // 0-100
+  const [colorFloodMode, setColorFloodMode] = useState<'contiguous' | 'global'>('global');
+  const [colorPickPosition, setColorPickPosition] = useState<{x: number, y: number} | null>(null);
   const [fps, setFps] = useState(12); // 1-30
   const [outputWidth, setOutputWidth] = useState(480);
   const [outputHeight, setOutputHeight] = useState(480);
@@ -282,6 +284,7 @@ export default function App() {
       const pixel = ctx.getImageData(x, y, 1, 1).data;
       const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
       setTargetColor(hex);
+      setColorPickPosition({ x: Math.round(x), y: Math.round(y) });
     } else if (interactionMode === 'watermark') {
       setStartPos({ x, y });
       setIsDrawing(true);
@@ -546,7 +549,7 @@ export default function App() {
           const sim = Math.max(0.01, similarity / 100).toFixed(2);
           const blnd = (blend / 100).toFixed(2);
           vf += `colorkey=${colorHex}:${sim}:${blnd},`;
-        } else if (similarity > 0 && (targetColor !== '#000000' || interactionMode === 'color')) {
+        } else if (colorFloodMode === 'global' && similarity > 0 && (targetColor !== '#000000' || interactionMode === 'color')) {
           const colorHex = targetColor.replace('#', '0x');
           const sim = (similarity / 100).toFixed(2);
           const blnd = (blend / 100).toFixed(2);
@@ -579,6 +582,90 @@ export default function App() {
         const updatedFrameFiles = updatedFiles
           .filter(f => typeof f.name === 'string' && f.name.startsWith('frame_') && f.name.endsWith('.png'))
           .sort((a, b) => a.name.localeCompare(b.name));
+
+        // Apply contiguous flood fill if mode is contiguous and a color was picked
+        if (colorFloodMode === 'contiguous' && colorPickPosition && similarity > 0 && originalDimensions) {
+          const floodCanvas = document.createElement('canvas');
+          const floodCtx = floodCanvas.getContext('2d');
+          if (floodCtx) {
+            const seedX = Math.round(colorPickPosition.x * (outputWidth / originalDimensions.w));
+            const seedY = Math.round(colorPickPosition.y * (outputHeight / originalDimensions.h));
+
+            const tr = parseInt(targetColor.slice(1, 3), 16);
+            const tg = parseInt(targetColor.slice(3, 5), 16);
+            const tb = parseInt(targetColor.slice(5, 7), 16);
+            const maxDistSq = 195075;
+            const thresholdSq = maxDistSq * Math.pow(similarity / 100, 2);
+
+            for (let i = 0; i < updatedFrameFiles.length; i++) {
+              setProcessingStatus(`Applying contiguous flood fill on frame ${i + 1} of ${updatedFrameFiles.length}...`);
+              setProgress(Math.round((i / updatedFrameFiles.length) * 100));
+
+              const file = updatedFrameFiles[i];
+              const rawData = await ffmpeg.readFile(file.name);
+              const blob = new Blob([rawData], { type: 'image/png' });
+              const imgUrl = URL.createObjectURL(blob);
+              const img = new Image();
+              img.src = imgUrl;
+              await new Promise(r => img.onload = r);
+
+              floodCanvas.width = img.width;
+              floodCanvas.height = img.height;
+              floodCtx.clearRect(0, 0, img.width, img.height);
+              floodCtx.drawImage(img, 0, 0);
+              URL.revokeObjectURL(imgUrl);
+
+              const imgData = floodCtx.getImageData(0, 0, img.width, img.height);
+              const px = imgData.data;
+              const w = img.width;
+              const h = img.height;
+
+              const sx = Math.min(Math.max(seedX, 0), w - 1);
+              const sy = Math.min(Math.max(seedY, 0), h - 1);
+              const seedIdx = (sy * w + sx) * 4;
+              if (px[seedIdx + 3] !== 0) {
+                const colorMatch = (r: number, g: number, b: number, a: number) => {
+                  if (a === 0) return false;
+                  const distSq = (r - tr) ** 2 + (g - tg) ** 2 + (b - tb) ** 2;
+                  return distSq <= thresholdSq;
+                };
+
+                const visited = new Uint8Array(w * h);
+                const queue = [sx, sy];
+                visited[sy * w + sx] = 1;
+
+                while (queue.length > 0) {
+                  const cy = queue.pop()!;
+                  const cx = queue.pop()!;
+                  const idx = (cy * w + cx) * 4;
+                  px[idx + 3] = 0;
+
+                  const neighbors = [[cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]];
+                  for (const [nx, ny] of neighbors) {
+                    if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                      const nIdx = ny * w + nx;
+                      if (!visited[nIdx]) {
+                        visited[nIdx] = 1;
+                        const pIdx = nIdx * 4;
+                        if (colorMatch(px[pIdx], px[pIdx+1], px[pIdx+2], px[pIdx+3])) {
+                          queue.push(nx, ny);
+                        }
+                      }
+                    }
+                  }
+                }
+
+                floodCtx.putImageData(imgData, 0, 0);
+
+                const outBlob = await new Promise<Blob | null>(resolve => floodCanvas.toBlob(resolve, 'image/png'));
+                if (outBlob) {
+                  const outBuffer = await outBlob.arrayBuffer();
+                  await ffmpeg.writeFile(file.name, new Uint8Array(outBuffer));
+                }
+              }
+            }
+          }
+        }
           
         const newFrames = [];
         for (let i = 0; i < updatedFrameFiles.length; i++) {
@@ -609,7 +696,7 @@ export default function App() {
       }
 
       const data = await ffmpeg.readFile('output.gif');
-      const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'image/gif' }));
+      const url = URL.createObjectURL(new Blob([data as Uint8Array], { type: 'image/gif' }));
       setGifUrl(url);
     } catch (err) {
       console.error(err);
@@ -818,7 +905,12 @@ export default function App() {
     <div className="min-h-screen bg-neutral-950 text-neutral-50 p-6 md:p-12 font-sans">
       <div className="max-w-6xl mx-auto space-y-8">
         <header className="border-b border-neutral-800 pb-6">
-          <h1 className="text-3xl font-bold tracking-tight">Video to Transparent GIF</h1>
+          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
+            <svg width="40" height="25" viewBox="0 0 145 92" xmlns="http://www.w3.org/2000/svg" overflow="hidden">
+              <path d="M46.1 0C58.83 0 70.35 5.15 78.69 13.47L83.22 20.18 145 20.18 132.06 71.82 83.22 71.82 78.69 78.53C70.35 86.85 58.83 92 46.1 92 20.64 92 0 71.41 0 46 0 20.59 20.64 0 46.1 0Z" fill="#FFFFFF" fillRule="evenodd"/>
+            </svg>
+            Video to Transparent GIF
+          </h1>
           <p className="text-neutral-400 mt-2">Convert MP4 videos to GIFs with transparent backgrounds. Remove colors and watermarks easily.</p>
         </header>
 
@@ -1044,6 +1136,25 @@ export default function App() {
                       </div>
 
                       <div>
+                        <label className="block text-sm font-medium text-neutral-300 mb-2">Flood Mode</label>
+                        <div className="flex bg-neutral-950 rounded-lg overflow-hidden border border-neutral-800">
+                          <button
+                            onClick={() => setColorFloodMode('contiguous')}
+                            className={`flex-1 text-sm py-2 transition-colors ${colorFloodMode === 'contiguous' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                          >Contiguous</button>
+                          <button
+                            onClick={() => setColorFloodMode('global')}
+                            className={`flex-1 text-sm py-2 transition-colors ${colorFloodMode === 'global' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                          >Global</button>
+                        </div>
+                        <p className="text-xs text-neutral-500 mt-1">
+                          {colorFloodMode === 'contiguous' 
+                            ? 'Removes only contiguous pixels of the selected color from the clicked position.' 
+                            : 'Removes all pixels of the selected color across the entire image.'}
+                        </p>
+                      </div>
+
+                      <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-sm font-medium text-neutral-300">Margin (Tolerance)</label>
                           <span className="text-sm text-neutral-400">{similarity}%</span>
@@ -1058,6 +1169,7 @@ export default function App() {
                         <p className="text-xs text-neutral-500 mt-1">Set to 0 to disable color removal. Increase if edges of the original color remain.</p>
                       </div>
 
+                      {colorFloodMode === 'global' && (
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-sm font-medium text-neutral-300">Smoothing (Blend)</label>
@@ -1071,6 +1183,7 @@ export default function App() {
                           className="w-full accent-blue-500"
                         />
                       </div>
+                      )}
                     </>
                   ) : (
                     <div className="space-y-6">

@@ -15,7 +15,7 @@ interface FrameEditorProps {
 }
 
 export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMultipleFrames, onSelectFrame, onClose, onDeleteFrame, ffmpeg }: FrameEditorProps) {
-  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser' | 'move'>('view');
+  const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser' | 'move' | 'flip'>('view');
   const [moveOffset, setMoveOffset] = useState({x: 0, y: 0});
   const [dragStartOffset, setDragStartOffset] = useState({x: 0, y: 0});
   const [threshold, setThreshold] = useState(0);
@@ -30,6 +30,7 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
   const [targetColor, setTargetColor] = useState('#00FF00');
   const [similarity, setSimilarity] = useState(30);
   const [blend, setBlend] = useState(10);
+  const [colorFloodMode, setColorFloodMode] = useState<'contiguous' | 'global'>('global');
   
   // Watermark mode
   const [watermarkRect, setWatermarkRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
@@ -419,6 +420,56 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
       const pixel = ctx.getImageData(coords.x, coords.y, 1, 1).data;
       const hex = "#" + (1 << 24 | pixel[0] << 16 | pixel[1] << 8 | pixel[2]).toString(16).slice(1).toUpperCase();
       setTargetColor(hex);
+
+      if (colorFloodMode === 'contiguous') {
+        const { x, y } = coords;
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
+        const width = canvas.width;
+        const height = canvas.height;
+        const targetR = pixel[0], targetG = pixel[1], targetB = pixel[2], targetA = pixel[3];
+        if (targetA === 0) return;
+
+        const sim = similarity / 100;
+        const maxDistSq = 195075;
+        const thresholdSq = maxDistSq * Math.pow(sim, 2);
+
+        const colorMatch = (r: number, g: number, b: number, a: number) => {
+          if (a === 0) return false;
+          const distSq = (r - targetR) ** 2 + (g - targetG) ** 2 + (b - targetB) ** 2;
+          return distSq <= thresholdSq;
+        };
+
+        const visited = new Uint8Array(width * height);
+        const queue = [x, y];
+        visited[y * width + x] = 1;
+
+        while (queue.length > 0) {
+          const cy = queue.pop()!;
+          const cx = queue.pop()!;
+          const idx = (cy * width + cx) * 4;
+          data[idx + 3] = 0;
+
+          const neighbors = [
+            [cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]
+          ];
+          for (const [nx, ny] of neighbors) {
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+              const nIdx = ny * width + nx;
+              if (!visited[nIdx]) {
+                visited[nIdx] = 1;
+                const pIdx = nIdx * 4;
+                if (colorMatch(data[pIdx], data[pIdx+1], data[pIdx+2], data[pIdx+3])) {
+                  queue.push(nx, ny);
+                }
+              }
+            }
+          }
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+        setHasUnsavedChanges(true);
+      }
       return;
     }
 
@@ -719,6 +770,59 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
     }
   };
 
+  const handleFlipAllFrames = async () => {
+    if (!onUpdateMultipleFrames) return;
+    setIsApplyingAll(true);
+    try {
+      const updates: {filename: string, newUrl: string, newBlob: Blob}[] = [];
+
+      for (let i = 0; i < frames.length; i++) {
+        const f = frames[i];
+        const img = new Image();
+        img.src = f.url;
+        await new Promise((r) => { img.onload = r; img.onerror = r; });
+
+        const offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = img.width;
+        offscreenCanvas.height = img.height;
+        const offCtx = offscreenCanvas.getContext('2d');
+        if (!offCtx) continue;
+
+        offCtx.translate(img.width, 0);
+        offCtx.scale(-1, 1);
+        offCtx.drawImage(img, 0, 0);
+
+        const blob = await new Promise<Blob | null>(r => offscreenCanvas.toBlob(r, 'image/png'));
+        if (blob) {
+          const newUrl = URL.createObjectURL(blob);
+          updates.push({ filename: f.filename, newUrl, newBlob: blob });
+        }
+      }
+
+      await onUpdateMultipleFrames(updates);
+
+      // Also update current canvas
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const mainCtx = canvas.getContext('2d');
+        const currentUpdate = updates.find(u => u.filename === frame.filename);
+        if (mainCtx && currentUpdate) {
+          const img = new Image();
+          img.src = currentUpdate.newUrl;
+          await new Promise((r) => { img.onload = r; });
+          mainCtx.clearRect(0, 0, canvas.width, canvas.height);
+          mainCtx.drawImage(img, 0, 0);
+        }
+      }
+      setHasUnsavedChanges(false);
+    } catch (e) {
+      console.error(e);
+      alert("Error flipping all frames.");
+    } finally {
+      setIsApplyingAll(false);
+    }
+  };
+
   const saveChanges = (): Promise<void> => {
     return new Promise((resolve) => {
       const canvas = canvasRef.current;
@@ -1014,9 +1118,8 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
               Normal View
             </button>
             <button 
-              onClick={handleFlipHorizontal}
-              disabled={isProcessing}
-              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center hover:bg-neutral-800 text-neutral-300 disabled:opacity-50`}
+              onClick={() => { setMode('flip'); clearMask(); }}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center ${mode === 'flip' ? 'bg-blue-600 text-white' : 'hover:bg-neutral-800 text-neutral-300'}`}
             >
               <FlipHorizontal className="w-4 h-4 mr-2" />
               Flip Horizontal
@@ -1097,7 +1200,21 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
                     className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-blue-500"
                   />
                 </div>
-                <p className="text-[10px] text-neutral-500 mt-1">Click on the image to pick a color</p>
+                <p className="text-[10px] text-neutral-500 mt-1">{colorFloodMode === 'contiguous' ? 'Click on the image to pick & remove contiguous color' : 'Click on the image to pick a color'}</p>
+              </div>
+
+              <div>
+                <label className="text-xs text-neutral-400 block mb-1">Flood Mode</label>
+                <div className="flex bg-neutral-950 rounded-md overflow-hidden border border-neutral-800">
+                  <button
+                    onClick={() => setColorFloodMode('contiguous')}
+                    className={`flex-1 text-xs py-1.5 rounded-md transition-colors ${colorFloodMode === 'contiguous' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                  >Contiguous</button>
+                  <button
+                    onClick={() => setColorFloodMode('global')}
+                    className={`flex-1 text-xs py-1.5 rounded-md transition-colors ${colorFloodMode === 'global' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'}`}
+                  >Global</button>
+                </div>
               </div>
               
               <div>
@@ -1126,14 +1243,16 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
                 />
               </div>
               
-              <button 
-                onClick={applyColorKey} 
-                disabled={isProcessing}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white text-sm py-2 rounded-lg flex items-center justify-center"
-              >
-                {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <MousePointer2 className="w-4 h-4 mr-2" />}
-                Apply Color Key
-              </button>
+              {colorFloodMode === 'global' && (
+                <button 
+                  onClick={applyColorKey} 
+                  disabled={isProcessing}
+                  className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white text-sm py-2 rounded-lg flex items-center justify-center"
+                >
+                  {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <MousePointer2 className="w-4 h-4 mr-2" />}
+                  Apply Color Key
+                </button>
+              )}
               
               <button onClick={saveChanges} disabled={isProcessing} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center mt-2">
                 <Save className="w-4 h-4 mr-2" /> Save Changes
@@ -1224,6 +1343,28 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
             </div>
           )}
           
+          {mode === 'flip' && (
+            <div className="space-y-4 pt-4 border-t border-neutral-800">
+              <p className="text-xs text-neutral-400">Flip the current frame or all frames horizontally.</p>
+              <button 
+                onClick={handleFlipHorizontal}
+                disabled={isProcessing || isApplyingAll}
+                className="w-full bg-neutral-800 hover:bg-neutral-700 text-white text-sm py-2 rounded-lg flex items-center justify-center disabled:opacity-50"
+              >
+                {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <FlipHorizontal className="w-4 h-4 mr-2" />}
+                Apply
+              </button>
+              <button 
+                onClick={handleFlipAllFrames}
+                disabled={isProcessing || isApplyingAll}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2 rounded-lg flex items-center justify-center disabled:opacity-50"
+              >
+                {isApplyingAll ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <FlipHorizontal className="w-4 h-4 mr-2" />}
+                Apply All
+              </button>
+            </div>
+          )}
+
           {mode === 'cleanup' && (
             <div className="space-y-4 pt-4 border-t border-neutral-800">
               <div>
