@@ -47,6 +47,13 @@ export default function App() {
   const [selectedFrame, setSelectedFrame] = useState<{filename: string, url: string} | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedFilenames, setSelectedFilenames] = useState<Set<string>>(new Set());
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const [isDraggingFrames, setIsDraggingFrames] = useState(false);
+  const dragMovingRef = useRef<Set<string>>(new Set());
+  const framesGridRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollRef = useRef<number | null>(null);
+  const pointerYRef = useRef<number>(0);
+  const dragOverCleanupRef = useRef<(() => void) | null>(null);
   const [isRebuilding, setIsRebuilding] = useState(false);
 
   // Sprite Sheet (output)
@@ -855,6 +862,93 @@ export default function App() {
     setSelectedFilenames(new Set());
   };
 
+  const handleFrameDragStart = (e: React.DragEvent, frame: {filename: string, url: string}) => {
+    // Drag the whole selection if the grabbed frame is part of it, otherwise just this frame
+    const moving = selectedFilenames.has(frame.filename) && selectedFilenames.size > 0
+      ? new Set(selectedFilenames)
+      : new Set([frame.filename]);
+    dragMovingRef.current = moving;
+    setIsDraggingFrames(true);
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', frame.filename); } catch { /* noop */ }
+    pointerYRef.current = e.clientY;
+    startAutoScroll();
+  };
+
+  // Auto-scroll the frames panel while dragging near its top/bottom edge
+  const startAutoScroll = () => {
+    if (autoScrollRef.current !== null) return;
+    const EDGE = 56; // px sensitivity zone at each edge
+    const MAX_SPEED = 16; // px per frame at full intensity
+    const onWindowDragOver = (ev: DragEvent) => { pointerYRef.current = ev.clientY; };
+    window.addEventListener('dragover', onWindowDragOver);
+    dragOverCleanupRef.current = () => window.removeEventListener('dragover', onWindowDragOver);
+
+    const step = () => {
+      const el = framesGridRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const y = pointerYRef.current;
+        if (y < rect.top + EDGE) {
+          const intensity = Math.min((rect.top + EDGE - y) / EDGE, 2);
+          el.scrollTop -= MAX_SPEED * intensity;
+        } else if (y > rect.bottom - EDGE) {
+          const intensity = Math.min((y - (rect.bottom - EDGE)) / EDGE, 2);
+          el.scrollTop += MAX_SPEED * intensity;
+        }
+      }
+      autoScrollRef.current = requestAnimationFrame(step);
+    };
+    autoScrollRef.current = requestAnimationFrame(step);
+  };
+
+  const stopAutoScroll = () => {
+    if (autoScrollRef.current !== null) {
+      cancelAnimationFrame(autoScrollRef.current);
+      autoScrollRef.current = null;
+    }
+    if (dragOverCleanupRef.current) {
+      dragOverCleanupRef.current();
+      dragOverCleanupRef.current = null;
+    }
+  };
+
+  const handleFrameDragOver = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    pointerYRef.current = e.clientY;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const insertAfter = e.clientX > rect.left + rect.width / 2;
+    setDropIndex(insertAfter ? idx + 1 : idx);
+  };
+
+  const clearDragState = () => {
+    stopAutoScroll();
+    setIsDraggingFrames(false);
+    setDropIndex(null);
+    dragMovingRef.current = new Set();
+  };
+
+  const handleFrameDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const target = dropIndex;
+    const movingSet = new Set(dragMovingRef.current);
+    clearDragState();
+    if (target === null || movingSet.size === 0) return;
+
+    const moving = frames.filter(f => movingSet.has(f.filename));
+    const remaining = frames.filter(f => !movingSet.has(f.filename));
+    // How many non-moving frames sit before the target gap in the original order
+    const insertAt = frames.slice(0, target).filter(f => !movingSet.has(f.filename)).length;
+    const result = [...remaining.slice(0, insertAt), ...moving, ...remaining.slice(insertAt)];
+
+    // Skip if order didn't actually change
+    if (result.length === frames.length && result.every((f, i) => f.filename === frames[i].filename)) return;
+
+    setFrames(result);
+    await rebuildGif(result);
+  };
+
   const reset = () => {
     setVideoFile(null);
     setVideoUrl('');
@@ -1490,8 +1584,8 @@ export default function App() {
                     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                       <p className="text-sm text-neutral-400">
                         {selectedFilenames.size > 0
-                          ? `${selectedFilenames.size} frame${selectedFilenames.size > 1 ? 's' : ''} selected`
-                          : 'Tap frames to select them for deletion.'}
+                          ? `${selectedFilenames.size} frame${selectedFilenames.size > 1 ? 's' : ''} selected · drag to reorder`
+                          : 'Tap frames to select · drag any frame to reorder.'}
                       </p>
                       <div className="flex items-center gap-2">
                         <button
@@ -1522,35 +1616,53 @@ export default function App() {
                     </div>
                   )}
                   
-                  <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-2 max-h-64 overflow-y-auto p-2 bg-neutral-950 rounded-xl border border-neutral-800">
+                  <div ref={framesGridRef} className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-2 max-h-64 overflow-y-auto p-2 bg-neutral-950 rounded-xl border border-neutral-800">
                     {frames.map((frame, idx) => {
                       const isSelected = selectedFilenames.has(frame.filename);
+                      const isMoving = isDraggingFrames && dragMovingRef.current.has(frame.filename);
+                      const isLast = idx === frames.length - 1;
                       return (
-                        <button
+                        <div
                           key={frame.filename}
-                          onClick={() => {
-                            if (selectionMode) {
-                              toggleFrameSelection(frame.filename);
-                            } else {
-                              setSelectedFrame(frame);
-                            }
-                          }}
-                          className={`relative aspect-square rounded-lg overflow-hidden border-2 transition-colors bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYNgvwEAIYIRLgM7//2H4PwxjE0A2jGwYvIExGkZjw2hsGIZhGIZhGAYAL+4/wQvP9/QAAAAASUVORK5CYII=')] bg-repeat ${
-                            isSelected ? 'border-purple-500 ring-2 ring-purple-500' : 'border-transparent hover:border-purple-500'
-                          }`}
+                          className="relative"
+                          draggable={selectionMode}
+                          onDragStart={(e) => handleFrameDragStart(e, frame)}
+                          onDragOver={(e) => handleFrameDragOver(e, idx)}
+                          onDrop={handleFrameDrop}
+                          onDragEnd={clearDragState}
                         >
-                          <img src={frame.url} alt={`Frame ${idx}`} className={`w-full h-full object-contain transition-opacity ${selectionMode && !isSelected ? 'opacity-60' : ''}`} />
-                          {selectionMode && (
-                            <div className={`absolute top-1 right-1 w-5 h-5 rounded-md flex items-center justify-center border-2 transition-colors ${
-                              isSelected ? 'bg-purple-500 border-purple-500' : 'bg-black/50 border-white/70'
-                            }`}>
-                              {isSelected && <Check className="w-3.5 h-3.5 text-white" strokeWidth={3} />}
-                            </div>
+                          {/* Insertion indicator */}
+                          {isDraggingFrames && dropIndex === idx && (
+                            <div className="absolute -left-1.5 top-0 bottom-0 w-1 bg-blue-500 rounded-full z-20 shadow-[0_0_6px_rgba(59,130,246,0.9)]" />
                           )}
-                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[10px] text-center py-0.5">
-                            {idx + 1}
-                          </div>
-                        </button>
+                          {isDraggingFrames && isLast && dropIndex === idx + 1 && (
+                            <div className="absolute -right-1.5 top-0 bottom-0 w-1 bg-blue-500 rounded-full z-20 shadow-[0_0_6px_rgba(59,130,246,0.9)]" />
+                          )}
+                          <button
+                            onClick={() => {
+                              if (selectionMode) {
+                                toggleFrameSelection(frame.filename);
+                              } else {
+                                setSelectedFrame(frame);
+                              }
+                            }}
+                            className={`relative w-full aspect-square rounded-lg overflow-hidden border-2 transition-all bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYNgvwEAIYIRLgM7//2H4PwxjE0A2jGwYvIExGkZjw2hsGIZhGIZhGAYAL+4/wQvP9/QAAAAASUVORK5CYII=')] bg-repeat ${
+                              isSelected ? 'border-purple-500 ring-2 ring-purple-500' : 'border-transparent hover:border-purple-500'
+                            } ${selectionMode ? 'cursor-grab active:cursor-grabbing' : ''} ${isMoving ? 'opacity-40' : ''}`}
+                          >
+                            <img draggable={false} src={frame.url} alt={`Frame ${idx}`} className={`w-full h-full object-contain transition-opacity ${selectionMode && !isSelected ? 'opacity-60' : ''}`} />
+                            {selectionMode && (
+                              <div className={`absolute top-1 right-1 w-5 h-5 rounded-md flex items-center justify-center border-2 transition-colors ${
+                                isSelected ? 'bg-purple-500 border-purple-500' : 'bg-black/50 border-white/70'
+                              }`}>
+                                {isSelected && <Check className="w-3.5 h-3.5 text-white" strokeWidth={3} />}
+                              </div>
+                            )}
+                            <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[10px] text-center py-0.5">
+                              {idx + 1}
+                            </div>
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
