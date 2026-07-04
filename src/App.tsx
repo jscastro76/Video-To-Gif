@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal, CheckSquare, Trash2, X, Check } from 'lucide-react';
 import FrameEditor from './components/FrameEditor';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
@@ -45,6 +45,8 @@ export default function App() {
   // Frame Editing
   const [frames, setFrames] = useState<{filename: string, url: string}[]>([]);
   const [selectedFrame, setSelectedFrame] = useState<{filename: string, url: string} | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedFilenames, setSelectedFilenames] = useState<Set<string>>(new Set());
   const [isRebuilding, setIsRebuilding] = useState(false);
 
   // Sprite Sheet (output)
@@ -214,7 +216,7 @@ export default function App() {
           const newFrames = [];
           for (const f of frameFiles) {
             const data = await ffmpeg.readFile(f.name);
-            const blob = new Blob([data], { type: 'image/png' });
+            const blob = new Blob([data as BlobPart], { type: 'image/png' });
             newFrames.push({ filename: f.name, url: URL.createObjectURL(blob) });
           }
           setFrames(newFrames);
@@ -467,7 +469,7 @@ export default function App() {
 
           const file = frameFiles[i];
           const data = await ffmpeg.readFile(file.name);
-          const blob = new Blob([data], { type: 'image/png' });
+          const blob = new Blob([data as BlobPart], { type: 'image/png' });
           const imgUrl = URL.createObjectURL(blob);
 
           const img = new Image();
@@ -508,7 +510,7 @@ export default function App() {
         const newFrames = [];
         for (const file of updatedFrameFiles) {
           const data = await ffmpeg.readFile(file.name);
-          const blob = new Blob([data], { type: 'image/png' });
+          const blob = new Blob([data as BlobPart], { type: 'image/png' });
           const url = URL.createObjectURL(blob);
           newFrames.push({ filename: file.name, url });
         }
@@ -603,7 +605,7 @@ export default function App() {
 
               const file = updatedFrameFiles[i];
               const rawData = await ffmpeg.readFile(file.name);
-              const blob = new Blob([rawData], { type: 'image/png' });
+              const blob = new Blob([rawData as BlobPart], { type: 'image/png' });
               const imgUrl = URL.createObjectURL(blob);
               const img = new Image();
               img.src = imgUrl;
@@ -673,7 +675,7 @@ export default function App() {
           setProgress(Math.round((i / updatedFrameFiles.length) * 100));
           const file = updatedFrameFiles[i];
           const data = await ffmpeg.readFile(file.name);
-          const blob = new Blob([data], { type: 'image/png' });
+          const blob = new Blob([data as BlobPart], { type: 'image/png' });
           const url = URL.createObjectURL(blob);
           newFrames.push({ filename: file.name, url });
         }
@@ -696,7 +698,7 @@ export default function App() {
       }
 
       const data = await ffmpeg.readFile('output.gif');
-      const url = URL.createObjectURL(new Blob([data as Uint8Array], { type: 'image/gif' }));
+      const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'image/gif' }));
       setGifUrl(url);
     } catch (err) {
       console.error(err);
@@ -741,7 +743,7 @@ export default function App() {
       ]);
 
       const data = await ffmpeg.readFile('output.gif');
-      const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'image/gif' }));
+      const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'image/gif' }));
       setGifUrl(url);
       
       // Cleanup temp files
@@ -807,6 +809,50 @@ export default function App() {
     
     // Rebuild GIF
     await rebuildGif(newFrames);
+  };
+
+  const handleDeleteMultipleFrames = async (filenames: string[]) => {
+    if (filenames.length === 0) return;
+    const toDelete = new Set(filenames);
+    const newFrames = frames.filter(f => !toDelete.has(f.filename));
+    setFrames(newFrames);
+
+    // If the currently open frame was deleted, close the editor
+    if (selectedFrame && toDelete.has(selectedFrame.filename)) {
+      setSelectedFrame(null);
+    }
+
+    // Remove from virtual file system if possible
+    const ffmpeg = ffmpegRef.current;
+    if (ffmpeg) {
+      for (const filename of filenames) {
+        try {
+          await ffmpeg.deleteFile(filename);
+        } catch (e) {
+          console.warn(`Could not delete ${filename} from virtual FS`, e);
+        }
+      }
+    }
+
+    // Rebuild GIF once for the whole batch
+    await rebuildGif(newFrames);
+  };
+
+  const toggleFrameSelection = (filename: string) => {
+    setSelectedFilenames(prev => {
+      const next = new Set(prev);
+      if (next.has(filename)) {
+        next.delete(filename);
+      } else {
+        next.add(filename);
+      }
+      return next;
+    });
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedFilenames(new Set());
   };
 
   const reset = () => {
@@ -890,7 +936,7 @@ export default function App() {
       ]);
 
       const data = await ffmpeg.readFile('output.gif');
-      const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'image/gif' }));
+      const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'image/gif' }));
       setGifUrl(url);
     } catch (err) {
       console.error(err);
@@ -1416,23 +1462,97 @@ export default function App() {
                       <Edit3 className="w-5 h-5 mr-2 text-purple-400" />
                       4. Edit Frames
                     </h2>
-                    {isRebuilding && <Loader2 className="w-4 h-4 animate-spin text-purple-400" />}
+                    <div className="flex items-center gap-2">
+                      {isRebuilding && <Loader2 className="w-4 h-4 animate-spin text-purple-400" />}
+                      {!selectionMode ? (
+                        <button
+                          onClick={() => setSelectionMode(true)}
+                          className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                          title="Select multiple frames to delete"
+                        >
+                          <CheckSquare className="w-4 h-4" />
+                          Select
+                        </button>
+                      ) : (
+                        <button
+                          onClick={exitSelectionMode}
+                          className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                        >
+                          <X className="w-4 h-4" />
+                          Cancel
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <p className="text-sm text-neutral-400 mb-4">Select a frame to apply edge cleanup or AI inpainting.</p>
+                  {!selectionMode ? (
+                    <p className="text-sm text-neutral-400 mb-4">Select a frame to apply edge cleanup or AI inpainting.</p>
+                  ) : (
+                    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                      <p className="text-sm text-neutral-400">
+                        {selectedFilenames.size > 0
+                          ? `${selectedFilenames.size} frame${selectedFilenames.size > 1 ? 's' : ''} selected`
+                          : 'Tap frames to select them for deletion.'}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (selectedFilenames.size === frames.length) {
+                              setSelectedFilenames(new Set());
+                            } else {
+                              setSelectedFilenames(new Set(frames.map(f => f.filename)));
+                            }
+                          }}
+                          className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-sm font-medium rounded-lg transition-colors"
+                        >
+                          {selectedFilenames.size === frames.length ? 'Deselect all' : 'Select all'}
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const toDelete = Array.from(selectedFilenames);
+                            exitSelectionMode();
+                            await handleDeleteMultipleFrames(toDelete);
+                          }}
+                          disabled={selectedFilenames.size === 0 || isRebuilding}
+                          className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          Delete {selectedFilenames.size > 0 ? `(${selectedFilenames.size})` : ''}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   
                   <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-2 max-h-64 overflow-y-auto p-2 bg-neutral-950 rounded-xl border border-neutral-800">
-                    {frames.map((frame, idx) => (
-                      <button
-                        key={frame.filename}
-                        onClick={() => setSelectedFrame(frame)}
-                        className="relative aspect-square rounded-lg overflow-hidden border-2 border-transparent hover:border-purple-500 transition-colors bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYNgvwEAIYIRLgM7//2H4PwxjE0A2jGwYvIExGkZjw2hsGIZhGIZhGAYAL+4/wQvP9/QAAAAASUVORK5CYII=')] bg-repeat"
-                      >
-                        <img src={frame.url} alt={`Frame ${idx}`} className="w-full h-full object-contain" />
-                        <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[10px] text-center py-0.5">
-                          {idx + 1}
-                        </div>
-                      </button>
-                    ))}
+                    {frames.map((frame, idx) => {
+                      const isSelected = selectedFilenames.has(frame.filename);
+                      return (
+                        <button
+                          key={frame.filename}
+                          onClick={() => {
+                            if (selectionMode) {
+                              toggleFrameSelection(frame.filename);
+                            } else {
+                              setSelectedFrame(frame);
+                            }
+                          }}
+                          className={`relative aspect-square rounded-lg overflow-hidden border-2 transition-colors bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMUlEQVQ4T2NkYNgvwEAIYIRLgM7//2H4PwxjE0A2jGwYvIExGkZjw2hsGIZhGIZhGAYAL+4/wQvP9/QAAAAASUVORK5CYII=')] bg-repeat ${
+                            isSelected ? 'border-purple-500 ring-2 ring-purple-500' : 'border-transparent hover:border-purple-500'
+                          }`}
+                        >
+                          <img src={frame.url} alt={`Frame ${idx}`} className={`w-full h-full object-contain transition-opacity ${selectionMode && !isSelected ? 'opacity-60' : ''}`} />
+                          {selectionMode && (
+                            <div className={`absolute top-1 right-1 w-5 h-5 rounded-md flex items-center justify-center border-2 transition-colors ${
+                              isSelected ? 'bg-purple-500 border-purple-500' : 'bg-black/50 border-white/70'
+                            }`}>
+                              {isSelected && <Check className="w-3.5 h-3.5 text-white" strokeWidth={3} />}
+                            </div>
+                          )}
+                          <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[10px] text-center py-0.5">
+                            {idx + 1}
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
 
                   {/* Sprite Sheet Generator */}
