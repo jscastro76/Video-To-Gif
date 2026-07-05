@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal, CheckSquare, Trash2, X, Check } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal, CheckSquare, Trash2, X, Check, Scissors, Pause } from 'lucide-react';
 import FrameEditor from './components/FrameEditor';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
@@ -35,6 +35,15 @@ export default function App() {
   const [cropStart, setCropStart] = useState<{x: number, y: number, cropX: number, cropY: number, cropW: number, cropH: number} | null>(null);
   const [aiThreshold, setAiThreshold] = useState(0); // 0-100
   const [flipHorizontal, setFlipHorizontal] = useState(false);
+
+  // Video Trim (in seconds)
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState(0);
+  const [trimDragging, setTrimDragging] = useState<'start' | 'end' | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const trimTrackRef = useRef<HTMLDivElement | null>(null);
 
   // Interaction Mode
   const [interactionMode, setInteractionMode] = useState<'color' | 'watermark' | 'ai' | 'crop'>('color');
@@ -170,6 +179,9 @@ export default function App() {
       setOriginalDimensions(null);
       setCrop(null);
       setFlipHorizontal(false);
+      setVideoDuration(0);
+      setTrimStart(0);
+      setTrimEnd(0);
 
       if (isGifFile) {
         setGifUrl(url);
@@ -262,6 +274,97 @@ export default function App() {
       setCrop({ x: 0, y: 0, w, h });
       setOutputWidth(w);
       setOutputHeight(h);
+    }
+
+    // Capture duration for trimming (video only)
+    if (!isGif) {
+      const dur = (media as HTMLVideoElement).duration;
+      if (isFinite(dur) && dur > 0 && videoDuration === 0) {
+        setVideoDuration(dur);
+        setTrimStart(0);
+        setTrimEnd(dur);
+      }
+    }
+  };
+
+  const formatTime = (sec: number) => {
+    if (!isFinite(sec) || sec < 0) sec = 0;
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    const ms = Math.round((sec - Math.floor(sec)) * 1000);
+    return `${m}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  };
+
+  const timeFromClientX = (clientX: number) => {
+    const track = trimTrackRef.current;
+    if (!track || videoDuration <= 0) return 0;
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1);
+    return ratio * videoDuration;
+  };
+
+  const handleTrimPointerDown = (which: 'start' | 'end') => (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTrimDragging(which);
+    try { (e.target as Element).setPointerCapture(e.pointerId); } catch { /* noop */ }
+    // Pause preview while scrubbing
+    const media = mediaRef.current;
+    if (media && !isGif) { try { media.pause(); } catch { /* noop */ } }
+  };
+
+  const handleTrimPointerMove = (e: React.PointerEvent) => {
+    if (!trimDragging) return;
+    const t = timeFromClientX(e.clientX);
+    const media = mediaRef.current;
+    if (trimDragging === 'start') {
+      const nt = Math.max(0, Math.min(t, trimEnd - 0.05));
+      setTrimStart(nt);
+      if (media && !isGif) { try { media.currentTime = nt; } catch { /* noop */ } }
+    } else {
+      const nt = Math.min(videoDuration, Math.max(t, trimStart + 0.05));
+      setTrimEnd(nt);
+      if (media && !isGif) { try { media.currentTime = nt; } catch { /* noop */ } }
+    }
+  };
+
+  const handleTrimPointerUp = () => {
+    if (!trimDragging) return;
+    setTrimDragging(null);
+    // Resume preview from the selected start
+    const media = mediaRef.current;
+    if (media && !isGif) {
+      try {
+        media.currentTime = trimStart;
+        media.play();
+      } catch { /* noop */ }
+    }
+  };
+
+  // Loop playback within the trimmed segment and keep the playhead in sync
+  const handleTimeUpdate = () => {
+    const media = mediaRef.current;
+    if (!media || isGif) return;
+    const t = media.currentTime;
+    if (videoDuration > 0 && trimEnd > trimStart && (t >= trimEnd || t < trimStart - 0.05)) {
+      try { media.currentTime = trimStart; } catch { /* noop */ }
+      setCurrentTime(trimStart);
+      return;
+    }
+    setCurrentTime(t);
+  };
+
+  const togglePlayPause = () => {
+    const media = mediaRef.current;
+    if (!media || isGif) return;
+    if (media.paused) {
+      // If the playhead is outside the segment, jump to start before playing
+      if (media.currentTime >= trimEnd || media.currentTime < trimStart) {
+        try { media.currentTime = trimStart; } catch { /* noop */ }
+      }
+      media.play();
+    } else {
+      media.pause();
     }
   };
 
@@ -431,6 +534,12 @@ export default function App() {
       const inputFile = isGif ? 'input.gif' : 'input.mp4';
       await ffmpeg.writeFile(inputFile, await fetchFile(videoFile));
 
+      // Trim: seek to start (fast input seek) and limit duration (output option)
+      const useTrim = !isGif && videoDuration > 0 && trimEnd > trimStart &&
+        (trimStart > 0.001 || trimEnd < videoDuration - 0.001);
+      const trimSeekArgs = useTrim ? ['-ss', trimStart.toFixed(3)] : [];
+      const trimDurationArgs = useTrim ? ['-t', (trimEnd - trimStart).toFixed(3)] : [];
+
       if (interactionMode === 'ai') {
         setProcessingStatus('Loading AI model (may take a while the first time)...');
         
@@ -455,7 +564,9 @@ export default function App() {
         setProcessingStatus('Extracting frames from media...');
         // Extract frames
         await ffmpeg.exec([
+          ...trimSeekArgs,
           '-i', inputFile,
+          ...trimDurationArgs,
           '-vf', extractVf,
           '-pix_fmt', 'rgba',
           'frame_%04d.png'
@@ -576,7 +687,9 @@ export default function App() {
         vf += `scale=${outputWidth}:${outputHeight}:flags=${resampleMethod},fps=${fps}`;
 
         const execArgs = [
+          ...trimSeekArgs,
           '-i', inputFile,
+          ...trimDurationArgs,
           '-an', // Ignorar stream de audio
           '-sn', // Ignorar subtítulos
           '-vf', vf,
@@ -958,6 +1071,9 @@ export default function App() {
     setFrames([]);
     setSelectedFrame(null);
     setIsSpriteSheet(false);
+    setVideoDuration(0);
+    setTrimStart(0);
+    setTrimEnd(0);
   };
 
   const convertSpriteSheetToGif = async () => {
@@ -1166,8 +1282,10 @@ export default function App() {
                           ref={mediaRef}
                           src={videoUrl} 
                           onLoadedMetadata={handleMediaLoad}
+                          onTimeUpdate={handleTimeUpdate}
+                          onPlay={() => setIsPlaying(true)}
+                          onPause={() => setIsPlaying(false)}
                           autoPlay
-                          loop
                           muted
                           playsInline
                           className="w-full h-auto block pointer-events-none"
@@ -1241,6 +1359,149 @@ export default function App() {
                             <Eraser className="w-4 h-4 mr-1" /> Clear area
                           </button>
                         )}
+                      </div>
+                    )}
+
+                    {/* Trim Selector (video only) */}
+                    {!isGif && videoDuration > 0 && (
+                      <div className="bg-neutral-950 rounded-xl border border-neutral-800 p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium text-neutral-300 flex items-center">
+                            <Scissors className="w-4 h-4 mr-2 text-blue-400" />
+                            Trim segment
+                          </span>
+                          <span className="text-xs text-neutral-500 font-mono">
+                            {formatTime(currentTime)} · Selection: {formatTime(Math.max(0, trimEnd - trimStart))}
+                          </span>
+                        </div>
+
+                        {/* Play/pause + Dual-handle timeline */}
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={togglePlayPause}
+                            className="shrink-0 w-9 h-9 flex items-center justify-center bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors"
+                            title={isPlaying ? 'Pause' : 'Play'}
+                            aria-label={isPlaying ? 'Pause preview' : 'Play preview'}
+                          >
+                            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                          </button>
+                          <div
+                            ref={trimTrackRef}
+                            className="relative flex-1 h-9 rounded-lg bg-neutral-800 select-none touch-none"
+                            onPointerMove={handleTrimPointerMove}
+                            onPointerUp={handleTrimPointerUp}
+                            onPointerLeave={handleTrimPointerUp}
+                          >
+                            {/* Dimmed outside regions */}
+                            <div className="absolute top-0 bottom-0 left-0 bg-black/50 rounded-l-lg" style={{ width: `${(trimStart / videoDuration) * 100}%` }} />
+                            <div className="absolute top-0 bottom-0 right-0 bg-black/50 rounded-r-lg" style={{ width: `${((videoDuration - trimEnd) / videoDuration) * 100}%` }} />
+                            {/* Selected region */}
+                            <div
+                              className="absolute top-0 bottom-0 bg-blue-500/20 border-y-2 border-blue-500"
+                              style={{ left: `${(trimStart / videoDuration) * 100}%`, right: `${((videoDuration - trimEnd) / videoDuration) * 100}%` }}
+                            />
+                            {/* Playhead */}
+                            <div
+                              className="absolute top-[-3px] bottom-[-3px] w-0.5 bg-white shadow-[0_0_4px_rgba(255,255,255,0.9)] pointer-events-none z-20"
+                              style={{ left: `${(currentTime / videoDuration) * 100}%` }}
+                            >
+                              <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white rounded-full" />
+                            </div>
+                            {/* Start handle */}
+                            <div
+                              onPointerDown={handleTrimPointerDown('start')}
+                              className="absolute top-0 bottom-0 w-3 -ml-1.5 flex items-center justify-center bg-blue-500 rounded cursor-ew-resize touch-none hover:bg-blue-400 z-10"
+                              style={{ left: `${(trimStart / videoDuration) * 100}%` }}
+                              title="Start"
+                            >
+                              <div className="w-0.5 h-4 bg-white/80 rounded-full" />
+                              {trimDragging === 'start' && (
+                                <div className="absolute -top-6 px-1.5 py-0.5 bg-blue-500 text-white text-[10px] rounded whitespace-nowrap">{formatTime(trimStart)}</div>
+                              )}
+                            </div>
+                            {/* End handle */}
+                            <div
+                              onPointerDown={handleTrimPointerDown('end')}
+                              className="absolute top-0 bottom-0 w-3 -ml-1.5 flex items-center justify-center bg-blue-500 rounded cursor-ew-resize touch-none hover:bg-blue-400 z-10"
+                              style={{ left: `${(trimEnd / videoDuration) * 100}%` }}
+                              title="End"
+                            >
+                              <div className="w-0.5 h-4 bg-white/80 rounded-full" />
+                              {trimDragging === 'end' && (
+                                <div className="absolute -top-6 px-1.5 py-0.5 bg-blue-500 text-white text-[10px] rounded whitespace-nowrap">{formatTime(trimEnd)}</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Precise numeric inputs */}
+                        <div className="flex flex-wrap items-end gap-3">
+                          <div>
+                            <label className="block text-[11px] font-medium text-neutral-400 mb-1">Start (s)</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min={0}
+                                max={trimEnd - 0.05}
+                                step={0.001}
+                                value={Number(trimStart.toFixed(3))}
+                                onChange={(e) => {
+                                  const v = Math.max(0, Math.min(parseFloat(e.target.value) || 0, trimEnd - 0.05));
+                                  setTrimStart(v);
+                                  const media = mediaRef.current;
+                                  if (media && !isGif) { try { media.currentTime = v; } catch { /* noop */ } }
+                                }}
+                                className="w-28 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
+                              />
+                              <button
+                                onClick={() => {
+                                  const media = mediaRef.current;
+                                  if (media && !isGif) setTrimStart(Math.max(0, Math.min(media.currentTime, trimEnd - 0.05)));
+                                }}
+                                className="px-2 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[11px] rounded-lg transition-colors whitespace-nowrap"
+                                title="Set start to current preview time"
+                              >Set ⇤</button>
+                            </div>
+                            <span className="text-[10px] text-neutral-500">{formatTime(trimStart)}</span>
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-medium text-neutral-400 mb-1">End (s)</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min={trimStart + 0.05}
+                                max={videoDuration}
+                                step={0.001}
+                                value={Number(trimEnd.toFixed(3))}
+                                onChange={(e) => {
+                                  const v = Math.min(videoDuration, Math.max(parseFloat(e.target.value) || 0, trimStart + 0.05));
+                                  setTrimEnd(v);
+                                  const media = mediaRef.current;
+                                  if (media && !isGif) { try { media.currentTime = v; } catch { /* noop */ } }
+                                }}
+                                className="w-28 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
+                              />
+                              <button
+                                onClick={() => {
+                                  const media = mediaRef.current;
+                                  if (media && !isGif) setTrimEnd(Math.min(videoDuration, Math.max(media.currentTime, trimStart + 0.05)));
+                                }}
+                                className="px-2 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[11px] rounded-lg transition-colors whitespace-nowrap"
+                                title="Set end to current preview time"
+                              >Set ⇥</button>
+                            </div>
+                            <span className="text-[10px] text-neutral-500">{formatTime(trimEnd)}</span>
+                          </div>
+                          <button
+                            onClick={() => { setTrimStart(0); setTrimEnd(videoDuration); }}
+                            className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded-lg transition-colors"
+                          >
+                            Reset to full
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-neutral-500">
+                          Total duration {formatTime(videoDuration)}. Drag the blue handles or type exact times. Only the selected segment will be converted.
+                        </p>
                       </div>
                     )}
                   </div>
