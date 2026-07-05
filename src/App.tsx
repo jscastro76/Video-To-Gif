@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal, CheckSquare, Trash2, X, Check, Scissors, Pause } from 'lucide-react';
+import { Upload, Settings, Download, Play, Loader2, Video, MousePointer2, RefreshCw, Eraser, SquareDashed, Sparkles, Edit3, Crop, Lock, Unlock, Grid, FlipHorizontal, CheckSquare, Trash2, X, Check, Scissors, Pause, Layers, ImagePlus } from 'lucide-react';
 import FrameEditor from './components/FrameEditor';
 
 // Import local FFmpeg core files to avoid CDN CORS/CORP issues
@@ -44,6 +44,16 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const trimTrackRef = useRef<HTMLDivElement | null>(null);
+
+  // Reference overlay (visual guide, does not affect output)
+  const [overlayUrl, setOverlayUrl] = useState<string | null>(null);
+  const [overlayOpacity, setOverlayOpacity] = useState(50); // 0-100
+  const [overlay, setOverlay] = useState({ xPct: 25, yPct: 25, widthPct: 50 });
+  const [overlayLocked, setOverlayLocked] = useState(false);
+  const overlayInputRef = useRef<HTMLInputElement | null>(null);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const overlayImgRef = useRef<HTMLImageElement | null>(null);
+  const overlayDragRef = useRef<{ mode: 'move' | 'resize'; startX: number; startY: number; origX: number; origY: number; origW: number; rect: DOMRect } | null>(null);
 
   // Interaction Mode
   const [interactionMode, setInteractionMode] = useState<'color' | 'watermark' | 'ai' | 'crop'>('color');
@@ -366,6 +376,86 @@ export default function App() {
     } else {
       media.pause();
     }
+  };
+
+  // Reference overlay handlers
+  const handleOverlayFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (overlayUrl) URL.revokeObjectURL(overlayUrl);
+    const url = URL.createObjectURL(file);
+    setOverlayUrl(url);
+    setOverlay({ xPct: 25, yPct: 25, widthPct: 50 });
+    setOverlayLocked(false);
+    e.target.value = '';
+  };
+
+  const removeOverlay = () => {
+    if (overlayUrl) URL.revokeObjectURL(overlayUrl);
+    setOverlayUrl(null);
+    overlayDragRef.current = null;
+  };
+
+  const handleOverlayPointerDown = (mode: 'move' | 'resize') => (e: React.PointerEvent) => {
+    if (overlayLocked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = previewContainerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    overlayDragRef.current = {
+      mode,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: overlay.xPct,
+      origY: overlay.yPct,
+      origW: overlay.widthPct,
+      rect,
+    };
+    try { (e.target as Element).setPointerCapture(e.pointerId); } catch { /* noop */ }
+  };
+
+  const handleOverlayPointerMove = (e: React.PointerEvent) => {
+    const d = overlayDragRef.current;
+    if (!d) return;
+    e.stopPropagation();
+    const dxPct = ((e.clientX - d.startX) / d.rect.width) * 100;
+    const dyPct = ((e.clientY - d.startY) / d.rect.height) * 100;
+    if (d.mode === 'move') {
+      setOverlay(o => ({ ...o, xPct: d.origX + dxPct, yPct: d.origY + dyPct }));
+    } else {
+      // Proportional resize driven by horizontal drag (height follows the image aspect ratio)
+      const newW = Math.max(5, Math.min(300, d.origW + dxPct));
+      setOverlay(o => ({ ...o, widthPct: newW }));
+    }
+  };
+
+  const handleOverlayPointerUp = (e: React.PointerEvent) => {
+    if (!overlayDragRef.current) return;
+    overlayDragRef.current = null;
+    try { (e.target as Element).releasePointerCapture(e.pointerId); } catch { /* noop */ }
+  };
+
+  // Set the crop rectangle to exactly match the placed & scaled reference overlay
+  const autoCropToOverlay = () => {
+    const container = previewContainerRef.current;
+    const img = overlayImgRef.current;
+    if (!container || !img || !originalDimensions) return;
+    const cRect = container.getBoundingClientRect();
+    const iRect = img.getBoundingClientRect();
+    if (cRect.width === 0 || cRect.height === 0) return;
+    const scaleX = originalDimensions.w / cRect.width;
+    const scaleY = originalDimensions.h / cRect.height;
+    let x = (iRect.left - cRect.left) * scaleX;
+    let y = (iRect.top - cRect.top) * scaleY;
+    let w = iRect.width * scaleX;
+    let h = iRect.height * scaleY;
+    // Clamp to the video bounds
+    x = Math.max(0, Math.min(x, originalDimensions.w));
+    y = Math.max(0, Math.min(y, originalDimensions.h));
+    w = Math.max(1, Math.min(w, originalDimensions.w - x));
+    h = Math.max(1, Math.min(h, originalDimensions.h - y));
+    setCrop({ x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) });
+    setInteractionMode('crop');
   };
 
   const rgbToHex = (r: number, g: number, b: number) => {
@@ -1074,6 +1164,8 @@ export default function App() {
     setVideoDuration(0);
     setTrimStart(0);
     setTrimEnd(0);
+    if (overlayUrl) URL.revokeObjectURL(overlayUrl);
+    setOverlayUrl(null);
   };
 
   const convertSpriteSheetToGif = async () => {
@@ -1263,6 +1355,7 @@ export default function App() {
 
                     <div 
                       className={`relative rounded-xl overflow-hidden border border-neutral-800 bg-black select-none touch-none ${interactionMode === 'color' ? 'cursor-crosshair' : 'cursor-crosshair'}`}
+                      ref={previewContainerRef}
                       onPointerDown={handlePointerDown}
                       onPointerMove={handlePointerMove}
                       onPointerUp={handlePointerUp}
@@ -1308,7 +1401,7 @@ export default function App() {
 
                       {/* Crop Overlay */}
                       {crop && originalDimensions && (
-                        <div className="absolute inset-0 pointer-events-none">
+                        <div className="absolute inset-0 pointer-events-none z-40">
                           <div className="absolute top-0 left-0 right-0 bg-black/50" style={{ height: `${(crop.y / originalDimensions.h) * 100}%` }} />
                           <div className="absolute bottom-0 left-0 right-0 bg-black/50" style={{ height: `${((originalDimensions.h - crop.y - crop.h) / originalDimensions.h) * 100}%` }} />
                           <div className="absolute bg-black/50" style={{ top: `${(crop.y / originalDimensions.h) * 100}%`, bottom: `${((originalDimensions.h - crop.y - crop.h) / originalDimensions.h) * 100}%`, left: 0, width: `${(crop.x / originalDimensions.w) * 100}%` }} />
@@ -1331,6 +1424,32 @@ export default function App() {
                               <div className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border border-black cursor-nesw-resize" onPointerDown={(e) => handleCropPointerDown(e, 'sw')} onPointerUp={handleCropPointerUp} />
                               <div className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border border-black cursor-nwse-resize" onPointerDown={(e) => handleCropPointerDown(e, 'se')} onPointerUp={handleCropPointerUp} />
                             </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Reference overlay (visual alignment guide) */}
+                      {overlayUrl && (
+                        <div
+                          className={`absolute z-30 ${overlayLocked ? 'pointer-events-none' : ''}`}
+                          style={{ left: `${overlay.xPct}%`, top: `${overlay.yPct}%`, width: `${overlay.widthPct}%`, opacity: overlayOpacity / 100 }}
+                          onPointerMove={handleOverlayPointerMove}
+                          onPointerUp={handleOverlayPointerUp}
+                        >
+                          <img src={overlayUrl} alt="Reference overlay" ref={overlayImgRef} draggable={false} className="w-full h-auto block select-none pointer-events-none" />
+                          {!overlayLocked && (
+                            <>
+                              <div
+                                onPointerDown={handleOverlayPointerDown('move')}
+                                className="absolute inset-0 cursor-move border-2 border-dashed border-emerald-400/80"
+                                title="Drag to move the reference"
+                              />
+                              <div
+                                onPointerDown={handleOverlayPointerDown('resize')}
+                                className="absolute -bottom-2 -right-2 w-5 h-5 bg-emerald-400 border-2 border-black rounded-sm cursor-nwse-resize shadow-md"
+                                title="Drag to resize proportionally"
+                              />
+                            </>
                           )}
                         </div>
                       )}
@@ -1361,6 +1480,107 @@ export default function App() {
                         )}
                       </div>
                     )}
+
+                    {/* Reference Overlay controls */}
+                    <div className="bg-neutral-950 rounded-xl border border-neutral-800 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-neutral-300 flex items-center">
+                          <Layers className="w-4 h-4 mr-2 text-emerald-400" />
+                          Reference overlay
+                        </span>
+                        <input ref={overlayInputRef} type="file" accept="image/*" className="hidden" onChange={handleOverlayFileChange} />
+                        {!overlayUrl ? (
+                          <button
+                            onClick={() => overlayInputRef.current?.click()}
+                            className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                          >
+                            <ImagePlus className="w-4 h-4" />
+                            Add image
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setOverlayLocked(l => !l)}
+                              className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 ${overlayLocked ? 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}
+                              title={overlayLocked ? 'Unlock to move/resize' : 'Lock position (interact with crop underneath)'}
+                            >
+                              {overlayLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                              {overlayLocked ? 'Locked' : 'Editing'}
+                            </button>
+                            <button
+                              onClick={() => overlayInputRef.current?.click()}
+                              className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-sm rounded-lg transition-colors"
+                              title="Replace image"
+                            >
+                              <RefreshCw className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={removeOverlay}
+                              className="px-2.5 py-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white text-sm rounded-lg transition-colors"
+                              title="Remove overlay"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {overlayUrl ? (
+                        <>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-neutral-400 w-16 shrink-0">Opacity</span>
+                            <input
+                              type="range"
+                              min={5}
+                              max={100}
+                              step={1}
+                              value={overlayOpacity}
+                              onChange={(e) => setOverlayOpacity(parseInt(e.target.value, 10))}
+                              className="flex-1 accent-emerald-500"
+                            />
+                            <span className="text-xs text-neutral-500 font-mono w-10 text-right">{overlayOpacity}%</span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-neutral-400 w-16 shrink-0">Size</span>
+                            <input
+                              type="range"
+                              min={5}
+                              max={200}
+                              step={0.5}
+                              value={overlay.widthPct}
+                              onChange={(e) => setOverlay(o => ({ ...o, widthPct: parseFloat(e.target.value) }))}
+                              className="flex-1 accent-emerald-500"
+                            />
+                            <span className="text-xs text-neutral-500 font-mono w-10 text-right">{Math.round(overlay.widthPct)}%</span>
+                          </div>
+                          {originalDimensions && (
+                            <button
+                              onClick={autoCropToOverlay}
+                              className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                              title="Match the crop to the overlay position and size"
+                            >
+                              <Crop className="w-4 h-4" />
+                              Auto-crop to overlay
+                            </button>
+                          )}
+                          <div className="flex items-center justify-between">
+                            <p className="text-[11px] text-neutral-500">
+                              Drag the image to move · drag the corner to resize proportionally. Guide only — not exported.
+                            </p>
+                            <button
+                              onClick={() => setOverlay({ xPct: 25, yPct: 25, widthPct: 50 })}
+                              className="text-[11px] text-neutral-400 hover:text-white transition-colors whitespace-nowrap ml-3"
+                            >
+                              Reset position
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-[11px] text-neutral-500">
+                          Upload a base frame (e.g. the idle pose) to align the crop so scaled frames match your other animations.
+                        </p>
+                      )}
+                    </div>
 
                     {/* Trim Selector (video only) */}
                     {!isGif && videoDuration > 0 && (
