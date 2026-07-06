@@ -1021,6 +1021,38 @@ export default function App() {
     await rebuildGif(newFrames);
   };
 
+  const handleDuplicateFrame = async (filename: string): Promise<{ filename: string; url: string } | null> => {
+    const idx = frames.findIndex(f => f.filename === filename);
+    if (idx === -1) return null;
+
+    const ffmpeg = ffmpegRef.current;
+    if (!ffmpeg) return null;
+
+    try {
+      // Copy the current (saved) frame data to a new unique file.
+      // Clone into a standalone buffer right away: ffmpeg.readFile returns a view over the
+      // WASM heap, and a later ffmpeg op (writeFile) can grow/realloc that heap and detach it.
+      const data = await ffmpeg.readFile(filename);
+      const bytes = new Uint8Array(data as Uint8Array);
+      const newFilename = `frame_dup_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.png`;
+      await ffmpeg.writeFile(newFilename, bytes);
+
+      const blob = new Blob([bytes], { type: 'image/png' });
+      const url = URL.createObjectURL(blob);
+      const newFrame = { filename: newFilename, url };
+
+      // Insert the duplicate right after the original
+      const newFrames = [...frames.slice(0, idx + 1), newFrame, ...frames.slice(idx + 1)];
+      setFrames(newFrames);
+
+      await rebuildGif(newFrames);
+      return newFrame;
+    } catch (e) {
+      console.error('Could not duplicate frame', e);
+      return null;
+    }
+  };
+
   const handleDeleteMultipleFrames = async (filenames: string[]) => {
     if (filenames.length === 0) return;
     const toDelete = new Set(filenames);
@@ -2224,6 +2256,7 @@ export default function App() {
                 onSelectFrame={setSelectedFrame}
                 onClose={() => setSelectedFrame(null)}
                 onDeleteFrame={handleDeleteFrame}
+                onDuplicateFrame={handleDuplicateFrame}
                 ffmpeg={ffmpegRef.current}
               />
             </div>

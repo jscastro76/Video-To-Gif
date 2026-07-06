@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal, Move, Trash2, RotateCcw } from 'lucide-react';
+import { Eraser, Sparkles, Loader2, Save, Undo, Brush, MousePointer2, SquareDashed, Wand2, Wand, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FlipHorizontal, Move, Trash2, RotateCcw, Copy } from 'lucide-react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 interface FrameEditorProps {
@@ -11,10 +11,11 @@ interface FrameEditorProps {
   onSelectFrame: (frame: { filename: string; url: string }) => void;
   onClose: () => void;
   onDeleteFrame?: (filename: string) => void;
+  onDuplicateFrame?: (filename: string) => Promise<{ filename: string; url: string } | null>;
   ffmpeg: FFmpeg | null;
 }
 
-export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMultipleFrames, onSelectFrame, onClose, onDeleteFrame, ffmpeg }: FrameEditorProps) {
+export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMultipleFrames, onSelectFrame, onClose, onDeleteFrame, onDuplicateFrame, ffmpeg }: FrameEditorProps) {
   const [mode, setMode] = useState<'view' | 'cleanup' | 'inpaint' | 'color' | 'watermark' | 'ai' | 'magicWand' | 'eraser' | 'move' | 'flip'>('view');
   const [moveOffset, setMoveOffset] = useState({x: 0, y: 0});
   const [dragStartOffset, setDragStartOffset] = useState({x: 0, y: 0});
@@ -1005,13 +1006,15 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
   };
 
   const executeNavigation = (direction: 'prev' | 'next') => {
-    const newIndex = direction === 'prev' ? currentIndex - 1 : currentIndex + 1;
-    if (newIndex >= 0 && newIndex < frames.length) {
-      onSelectFrame(frames[newIndex]);
-      setHasUnsavedChanges(false);
-      setWatermarkRect(null);
-      clearMask();
-    }
+    if (frames.length === 0) return;
+    // Wrap around so the user can jump from the last frame to the first (and vice versa)
+    const newIndex = direction === 'prev'
+      ? (currentIndex - 1 + frames.length) % frames.length
+      : (currentIndex + 1) % frames.length;
+    onSelectFrame(frames[newIndex]);
+    setHasUnsavedChanges(false);
+    setWatermarkRect(null);
+    clearMask();
     setShowConfirmModal(false);
     setPendingNavigation(null);
   };
@@ -1048,6 +1051,17 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
     setShowDeleteModal(true);
   };
 
+  const handleDuplicate = async () => {
+    if (!onDuplicateFrame) return;
+    const newFrame = await onDuplicateFrame(frame.filename);
+    if (newFrame) {
+      onSelectFrame(newFrame);
+      setHasUnsavedChanges(false);
+      setWatermarkRect(null);
+      clearMask();
+    }
+  };
+
   const confirmDelete = () => {
     let nextFrame = null;
     if (hasNext) {
@@ -1081,6 +1095,13 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
               title="Discard unsaved changes"
             >
               <RotateCcw className="w-3 h-3 mr-1" /> Discard
+            </button>
+            <button 
+              onClick={handleDuplicate} 
+              className="text-xs px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded-md flex items-center transition-colors"
+              title="Duplicate this frame (inserted right after it)"
+            >
+              <Copy className="w-3 h-3 mr-1" /> Duplicate
             </button>
             <button 
               onClick={handleDeleteFrame} 
@@ -1516,9 +1537,10 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
         
         {/* Canvas Area */}
         <div className="flex-1 relative flex overflow-hidden bg-neutral-950 group">
-          {hasPrev && (
+          {frames.length > 1 && (
             <button 
               onClick={() => handleNavigate('prev')}
+              title={hasPrev ? 'Previous frame' : 'Go to last frame'}
               className="absolute left-4 top-1/2 -translate-y-1/2 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
             >
               <ChevronLeft className="w-6 h-6" />
@@ -1566,9 +1588,10 @@ export default function FrameEditor({ frame, frames, onUpdateFrame, onUpdateMult
             </div>
           </div>
 
-          {hasNext && (
+          {frames.length > 1 && (
             <button 
               onClick={() => handleNavigate('next')}
+              title={hasNext ? 'Next frame' : 'Go to first frame'}
               className="absolute right-4 top-1/2 -translate-y-1/2 z-30 p-3 bg-neutral-900/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg border border-neutral-700"
             >
               <ChevronRight className="w-6 h-6" />
